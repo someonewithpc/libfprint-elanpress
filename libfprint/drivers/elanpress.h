@@ -113,10 +113,13 @@ static const ElanpressDeviceConfig elanpress_devices[] = {
   /* 80x80, two subjects on one pad: 0.76 admitted an unenrolled finger
    * there, 0.85 did not (see the merge request discussion). */
   [ELANPRESS_0C63] = { 0.85, 20, 3, 0.85 },
-  /* 150x52, two people. 15 held-out touches of the enrolled finger scored
-   * 0.848 to 0.954, 47 touches of four other fingers and a second person
-   * at most 0.761. */
-  [ELANPRESS_0C6E] = { 0.80, 20, 3, 0.85 },
+  /* 150x52, two people. With these values, 15 held-out touches of the
+   * enrolled finger scored at least 0.908 and 47 touches of four other
+   * fingers and a second person at most 0.766. Most frames of one press
+   * are more than 0.85 alike, so only the higher cutoff leaves several
+   * probes per touch, and more enroll images per touch raised the best
+   * impostor score more than the genuine ones. */
+  [ELANPRESS_0C6E] = { 0.80, 20, 1, 0.95 },
 };
 
 static const FpIdEntry elanpress_id_table[] = {
