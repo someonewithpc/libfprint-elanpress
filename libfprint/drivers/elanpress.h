@@ -83,16 +83,19 @@
 G_DECLARE_FINAL_TYPE (FpiDeviceElanPress, fpi_device_elanpress, FPI,
                       DEVICE_ELANPRESS, FpDevice);
 
-/* driver_data carries the per-device accept threshold x 1000. Both values
+/* driver_data carries the per-device accept threshold x 1000. All values
  * are provisional: each was calibrated on one physical pad. 0c3d: 140-image
  * pool, one subject (0/91 impostor images accepted, ~60% of genuine
  * touches). 0c63: two subjects on one 80x80 pad; 0.76 admitted an unenrolled
- * finger there, 0.85 did not (see the merge request discussion).
- * FP_ELANPRESS_THRESHOLD overrides either at runtime. */
+ * finger there, 0.85 did not (see the merge request discussion). 0c6e: one
+ * 150x52 pad, two people. 15 held-out touches of the enrolled finger scored
+ * 0.848 to 0.954, 47 touches of five other fingers at most 0.761.
+ * FP_ELANPRESS_THRESHOLD overrides any of them at runtime. */
 #define ELANPRESS_THRESHOLD(t) ((guint64) ((t) * 1000 + 0.5))
 
 static const FpIdEntry elanpress_id_table[] = {
   {.vid = ELANPRESS_VEND_ID, .pid = 0x0c3d, .driver_data = ELANPRESS_THRESHOLD (0.76), },
   {.vid = ELANPRESS_VEND_ID, .pid = 0x0c63, .driver_data = ELANPRESS_THRESHOLD (0.85), },
+  {.vid = ELANPRESS_VEND_ID, .pid = 0x0c6e, .driver_data = ELANPRESS_THRESHOLD (0.80), },
   {.vid = 0, .pid = 0, },
 };
