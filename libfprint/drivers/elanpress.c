@@ -24,6 +24,7 @@
 
 #include <math.h>
 #include <stdlib.h>
+#include <string.h>
 
 static const guint8 cmd_get_fw_ver[ELANPRESS_CMD_LEN] = {0x40, 0x19};
 static const guint8 cmd_get_sensor_dim[ELANPRESS_CMD_LEN] = {0x00, 0x0c};
@@ -51,6 +52,10 @@ struct _FpiDeviceElanPress
 
   /* raw background frame (no finger), row-major */
   guint16 *background;
+  /* last background that passed the check, used when a capture starts
+   * with the finger on the pad. It outlives close because fprintd closes
+   * the device after every verify. */
+  guint16 *clean_background;
   guint16  calib_mean;
   int      bg_attempts;
 
@@ -615,14 +620,28 @@ capture_run_state (FpiSsm *ssm, FpDevice *dev)
 
     case CAPTURE_BG_CHECK:
       self->bg_attempts++;
-      if (!elanpress_background_ok (self))
+      if (elanpress_background_ok (self))
         {
-          if (self->bg_attempts < ELANPRESS_BG_ATTEMPTS)
-            {
-              fp_dbg ("finger still on the pad, waiting for a clean background");
-              fpi_ssm_jump_to_state_delayed (ssm, CAPTURE_CALIB_MEAN_SEND, 150);
-              break;
-            }
+          g_free (self->clean_background);
+          self->clean_background = g_memdup2 (self->background,
+                                              frame_bytes);
+        }
+      else if (self->bg_attempts < (self->clean_background ?
+                                    ELANPRESS_BG_ATTEMPTS :
+                                    ELANPRESS_BG_ATTEMPTS_FIRST))
+        {
+          fp_dbg ("finger still on the pad, waiting for a clean background");
+          fpi_ssm_jump_to_state_delayed (ssm, CAPTURE_CALIB_MEAN_SEND, 150);
+          break;
+        }
+      else if (self->clean_background)
+        {
+          fp_dbg ("no clean background after %d attempts, reusing the last one",
+                  self->bg_attempts);
+          memcpy (self->background, self->clean_background, frame_bytes);
+        }
+      else
+        {
           fp_warn ("no clean background after %d attempts, using it anyway",
                    self->bg_attempts);
         }
@@ -1075,9 +1094,21 @@ fpi_device_elanpress_init (FpiDeviceElanPress *self)
 }
 
 static void
+fpi_device_elanpress_finalize (GObject *object)
+{
+  FpiDeviceElanPress *self = FPI_DEVICE_ELANPRESS (object);
+
+  g_clear_pointer (&self->clean_background, g_free);
+
+  G_OBJECT_CLASS (fpi_device_elanpress_parent_class)->finalize (object);
+}
+
+static void
 fpi_device_elanpress_class_init (FpiDeviceElanPressClass *klass)
 {
   FpDeviceClass *dev_class = FP_DEVICE_CLASS (klass);
+
+  G_OBJECT_CLASS (klass)->finalize = fpi_device_elanpress_finalize;
 
   dev_class->id = "elanpress";
   dev_class->full_name = "ElanTech press-type fingerprint sensor";

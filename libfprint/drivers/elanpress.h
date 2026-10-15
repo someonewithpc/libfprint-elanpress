@@ -68,6 +68,9 @@
  * elan driver's ELAN_CALIBRATION_MAX_DELTA */
 #define ELANPRESS_BG_MAX_DELTA 500
 #define ELANPRESS_BG_ATTEMPTS 8
+/* used while there is no clean background to fall back on. Subtracting a
+ * dirty one ruins the touch, so wait up to ~10 s for the finger to lift. */
+#define ELANPRESS_BG_ATTEMPTS_FIRST 60
 /* first firmware that answers the calibration-mean command */
 #define ELANPRESS_MIN_CALIBRATION_FW 0x0138
 
