@@ -164,6 +164,40 @@ elanpress_frame_stats (const guint16 *frame, int w, int h,
   *stddev = sqrt (MAX (ss / n - (s / n) * (s / n), 0.0));
 }
 
+/* Written as the negation of the rejects, so a gate set to NaN from the
+ * environment still rejects nothing, as it always has */
+gboolean
+elanpress_quality_passes (const ElanpressQuality *q, const ElanpressGates *g)
+{
+  return !(q->mean < g->min_mean || q->contrast < g->min_contrast ||
+           q->coverage < g->min_coverage);
+}
+
+/* A frame taken while the finger lands or lifts fails the coverage gate,
+ * but it is mostly ridge edges, so its contrast can be twice that of a full
+ * press. Letting it set the bar would drop every good frame of the touch */
+double
+elanpress_contrast_bar (const ElanpressQuality *q, guint n,
+                        const ElanpressGates *g)
+{
+  double best = 0;
+
+  for (guint i = 0; i < n; i++)
+    if (elanpress_quality_passes (&q[i], g))
+      best = MAX (best, q[i].contrast);
+  return 0.5 * best;
+}
+
+void
+elanpress_frames_pass (const ElanpressQuality *q, guint n,
+                       const ElanpressGates *g, gboolean *pass)
+{
+  double bar = elanpress_contrast_bar (q, n, g);
+
+  for (guint i = 0; i < n; i++)
+    pass[i] = elanpress_quality_passes (&q[i], g) && !(q[i].contrast < bar);
+}
+
 /* ---------------------------------------------------- preprocessing */
 
 /* Background subtraction, then local mean/std normalisation over a

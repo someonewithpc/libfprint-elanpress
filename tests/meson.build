@@ -410,6 +410,37 @@ if 'elanpress' in supported_drivers
     endforeach
 endif
 
+if 'elanpress' in drivers
+    test_exe = executable('test-elanpress-match',
+        sources: [
+            'test-elanpress-match.c',
+            '../libfprint/drivers/elanpress-match.c',
+        ],
+        include_directories: [ root_inc, include_directories('../libfprint/drivers') ],
+        dependencies: [ glib_dep, mathlib_dep ],
+        c_args: common_cflags,
+        install: installed_tests,
+        install_dir: installed_tests_execdir,
+    )
+    test('elanpress-match',
+        test_exe,
+        suite: ['unit-tests'],
+        env: envs,
+    )
+
+    configure_file(
+        input: 'test.in',
+        output: 'elanpress-match.test',
+        install: installed_tests,
+        install_dir: installed_tests_testdir,
+        configuration: {
+            'exec': installed_tests_execdir / 'test-elanpress-match',
+            'env': envs_str,
+            'extra_content': '',
+        },
+    )
+endif
+
 # Run udev rule generator with fatal warnings
 hwdb_envs = envs
 hwdb_envs.set('UDEV_HWDB', udev_hwdb.full_path())
