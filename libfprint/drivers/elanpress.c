@@ -120,6 +120,7 @@ typedef struct
   guint8          *img;
   ElanpressQuality q;
   int              idx;
+  gboolean         pass; /* passes the quality gates and the contrast bar */
 } Processed;
 
 static void
@@ -153,8 +154,12 @@ elanpress_process_touch (FpiDeviceElanPress *self, int max_keep)
 
   g_autoptr(GPtrArray) all = g_ptr_array_new_with_free_func (processed_free);
   GPtrArray *keep = g_ptr_array_new_with_free_func (g_free);
+  g_autofree ElanpressQuality *qs = g_new (ElanpressQuality, self->num_frames);
+  g_autofree gboolean *pass = g_new (gboolean, self->num_frames);
+  const ElanpressGates gates = {
+    self->min_mean, self->min_contrast, self->min_coverage
+  };
   int idx = self->num_frames;
-  double best_contrast = 0;
 
   /* the list is newest-first; number frames in capture order */
   for (GSList *l = self->frames; l; l = l->next)
@@ -168,10 +173,15 @@ elanpress_process_touch (FpiDeviceElanPress *self, int max_keep)
       elanpress_dump16 (self, "raw", idx, l->data);
       fp_dbg ("frame %d: mean %.0f contrast %.1f coverage %.2f",
               idx, p->q.mean, p->q.contrast, p->q.coverage);
-      best_contrast = MAX (best_contrast, p->q.contrast);
+      qs[all->len] = p->q;
       g_ptr_array_add (all, p);
     }
 
+  /* qs[] and pass[] follow all[], newest frame first; copy each result to
+   * its frame before the sort reorders all[] */
+  elanpress_frames_pass (qs, all->len, &gates, pass);
+  for (guint i = 0; i < all->len; i++)
+    ((Processed *) g_ptr_array_index (all, i))->pass = pass[i];
   g_ptr_array_sort (all, processed_cmp);
 
   for (guint i = 0; i < all->len && (int) keep->len < max_keep; i++)
@@ -179,9 +189,7 @@ elanpress_process_touch (FpiDeviceElanPress *self, int max_keep)
       Processed *p = g_ptr_array_index (all, i);
       gboolean dup = FALSE;
 
-      if (p->q.mean < self->min_mean || p->q.contrast < self->min_contrast ||
-          p->q.coverage < self->min_coverage ||
-          p->q.contrast < 0.5 * best_contrast)
+      if (!p->pass)
         {
           fp_dbg ("frame %d rejected by quality gate", p->idx);
           continue;

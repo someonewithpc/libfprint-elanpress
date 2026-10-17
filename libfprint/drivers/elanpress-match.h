@@ -30,6 +30,23 @@ typedef struct
   double coverage;  /* fraction of pixels carrying ridge texture, 0..1 */
 } ElanpressQuality;
 
+/* quality gates on a frame; raw sensor units. A finger raises the mean by
+ * roughly 1500 on the 0c3d pad. The coverage gate rejects a finger that
+ * only half landed on the small 0c3d pad; on larger pads (0c63, 80x80)
+ * every full press saturates it at 1.00, which is expected, not a signal.
+ * All are env-tunable, see elanpress.c */
+#define ELANPRESS_MIN_MEAN 150.0
+#define ELANPRESS_MIN_CONTRAST 40.0
+#define ELANPRESS_MIN_COVERAGE 0.35
+
+/* absolute per-frame quality gates, same units as ElanpressQuality */
+typedef struct
+{
+  double min_mean;
+  double min_contrast;
+  double min_coverage;
+} ElanpressGates;
+
 typedef struct
 {
   double rot_range;    /* degrees, search is +/- this */
@@ -84,6 +101,22 @@ void      elanpress_frame_stats (const guint16 *frame,
                                  int            h,
                                  double        *mean,
                                  double        *stddev);
+
+gboolean  elanpress_quality_passes (const ElanpressQuality *q,
+                                    const ElanpressGates   *g);
+
+/* half the best contrast among the frames of a touch that pass the gates,
+ * 0 when none do; frames under it are dropped */
+double    elanpress_contrast_bar (const ElanpressQuality *q,
+                                  guint                   n,
+                                  const ElanpressGates   *g);
+
+/* sets pass[i] for each of the n frames of a touch that clears both the
+ * gates and the contrast bar */
+void      elanpress_frames_pass (const ElanpressQuality *q,
+                                 guint                   n,
+                                 const ElanpressGates   *g,
+                                 gboolean               *pass);
 
 /* zero-shift normalised cross-correlation of two processed images, -1..1 */
 double    elanpress_similarity (const guint8 *a,
