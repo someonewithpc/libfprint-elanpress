@@ -318,6 +318,35 @@ if get_option('gtk-examples')
     endif
 endif
 
+# The elanpress matcher has AVX2 and AVX-512 copies of its inner loop that it
+# picks at run time. Without these intrinsics it keeps the SSE2 copy only
+have_elanpress_avx = false
+if 'elanpress' in supported_drivers and host_machine.cpu_family() in ['x86', 'x86_64']
+    have_elanpress_avx = cc.compiles('''
+        #include <immintrin.h>
+        __attribute__((target ("avx2"))) static int
+        avx2 (const void *p)
+        {
+          __m256i x = _mm256_madd_epi16 (_mm256_loadu_si256 (p), _mm256_setzero_si256 ());
+          return _mm_cvtsi128_si32 (_mm256_extracti128_si256 (x, 1));
+        }
+        __attribute__((target ("avx512bw"))) static int
+        avx512 (const void *p)
+        {
+          __m512i x = _mm512_loadu_si512 (p);
+          return _mm512_reduce_add_epi32 (_mm512_madd_epi16 (x, x));
+        }
+        int
+        main (void)
+        {
+          char buf[64] = { 0 };
+          return __builtin_cpu_supports ("avx512bw") ? avx512 (buf) :
+                 __builtin_cpu_supports ("avx2") ? avx2 (buf) : 0;
+        }
+    ''', name: 'AVX2 and AVX-512BW intrinsics for elanpress')
+endif
+libfprint_conf.set10('HAVE_ELANPRESS_AVX', have_elanpress_avx)
+
 # Some dependency resolving happens inside here
 subdir('libfprint')
 

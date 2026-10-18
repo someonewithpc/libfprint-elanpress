@@ -379,6 +379,37 @@ foreach test_name: unit_tests
     )
 endforeach
 
+if 'elanpress' in supported_drivers
+    # the second build leaves out the intrinsics, for the portable loops
+    foreach name, args: { 'elanpress-sums': [], 'elanpress-sums-portable': ['-DELANPRESS_NO_INTRINSICS'] }
+        test_exe = executable('test-' + name,
+            sources: 'test-elanpress-sums.c',
+            include_directories: [ root_inc, include_directories('../libfprint/drivers') ],
+            dependencies: [ glib_dep, mathlib_dep ],
+            c_args: common_cflags + args,
+            install: installed_tests,
+            install_dir: installed_tests_execdir,
+        )
+        test(name,
+            test_exe,
+            suite: ['unit-tests'],
+            env: envs,
+        )
+
+        configure_file(
+            input: 'test.in',
+            output: name + '.test',
+            install: installed_tests,
+            install_dir: installed_tests_testdir,
+            configuration: {
+                'exec': installed_tests_execdir / 'test-' + name,
+                'env': envs_str,
+                'extra_content': '',
+            },
+        )
+    endforeach
+endif
+
 # Run udev rule generator with fatal warnings
 hwdb_envs = envs
 hwdb_envs.set('UDEV_HWDB', udev_hwdb.full_path())

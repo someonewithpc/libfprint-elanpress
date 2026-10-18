@@ -24,15 +24,30 @@
  * Lesser General Public License for more details.
  */
 
+#include "config.h"
+
 #include "elanpress-match.h"
 
 #include <math.h>
+#ifdef __SSE2__
+#include <immintrin.h>
+#endif
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
 #ifndef M_PI
 #define M_PI 3.14159265358979323846
+#endif
+
+/* the unit test also builds the matcher without intrinsics, so the
+ * portable loops run on x86 too */
+#if defined(__SSE2__) && !defined(ELANPRESS_NO_INTRINSICS)
+#define ELANPRESS_SSE2 1
+/* meson checks that the compiler can build the AVX2 and AVX-512 copies */
+#if HAVE_ELANPRESS_AVX
+#define ELANPRESS_DISPATCH 1
+#endif
 #endif
 
 /* ------------------------------------------------------------ params */
@@ -255,11 +270,30 @@ elanpress_similarity (const guint8 *a, const guint8 *b, int w, int h)
 
 /* ---------------------------------------------------------- layers */
 
+/* Pixels per step of the general NCC loop. Each row carries PAD zero
+ * pixels on both sides, so a full-overlap sum can round its span out to
+ * whole steps instead of finishing every short row with a scalar tail. The
+ * cross-term loop of layer_sums_fullb() rounds to BLOCK instead. */
+#ifdef __AVX2__
+#define VEC 32
+#else
+#define VEC 16
+#endif
+#define PAD 32
+G_STATIC_ASSERT (PAD >= VEC / 2);
+
+/* Masks and squares are 16-bit like the values, so every NCC term is a
+ * 16 x 16 -> 32-bit multiply-add (pmaddwd). */
 typedef struct
 {
-  int     w, h;
-  gint16 *v;   /* value - 128, 0 where invalid */
-  guint8 *m;   /* validity mask */
+  int      w, h;
+  int      stride;
+  gint16  *buf[3];
+  gint16  *v;  /* value - 128, 0 where invalid */
+  gint16  *m;  /* validity mask, 0 or 1 */
+  gint16  *q;  /* v * v */
+  gboolean full;  /* every pixel valid */
+  gint32  *sat;   /* NULL, or summed-area tables of v, q and m, (w + 1) x (h + 1) each */
 } Layer;
 
 static void
@@ -267,28 +301,99 @@ layer_init (Layer *l, int w, int h)
 {
   l->w = w;
   l->h = h;
-  l->v = g_new0 (gint16, (size_t) w * h);
-  l->m = g_new0 (guint8, (size_t) w * h);
+  l->stride = w + 2 * PAD;
+  /* + 2 * PAD keeps the pointers valid when h is 0 */
+  for (int i = 0; i < 3; i++)
+    l->buf[i] = g_new0 (gint16, (size_t) l->stride * h + 2 * PAD);
+  l->v = l->buf[0] + PAD;
+  l->m = l->buf[1] + PAD;
+  l->q = l->buf[2] + PAD;
+  l->full = FALSE;
+  l->sat = NULL;
+}
+
+/* fill in the squares once v and m are final */
+static void
+layer_finish (Layer *l)
+{
+  l->full = TRUE;
+  for (int y = 0; y < l->h; y++)
+    for (int x = 0; x < l->w; x++)
+      {
+        int i = y * l->stride + x;
+
+        l->q[i] = l->v[i] * l->v[i];
+        if (!l->m[i])
+          l->full = FALSE;
+      }
+}
+
+/* q is at most 128 * 128, so a table of q over this many pixels stays
+ * below 2^31 */
+#define TABLE_MAX_PIXELS (G_MAXINT32 / (128 * 128))
+
+/* Summed-area tables for layer_sums_fullb(), which reads them without
+ * checking: every probe layer needs them, and a template needs them
+ * whenever it is full. A layer too large for 32-bit tables gets none and
+ * takes the general path. */
+static void
+layer_build_tables (Layer *l)
+{
+  int sw, sn;
+
+  if ((gint64) l->w * l->h > TABLE_MAX_PIXELS)
+    return;
+  sw = l->w + 1;
+  sn = sw * (l->h + 1);
+  l->sat = g_new0 (gint32, (size_t) 3 * sn);
+  for (int y = 0; y < l->h; y++)
+    for (int x = 0; x < l->w; x++)
+      {
+        int i = y * l->stride + x, j = (y + 1) * sw + x + 1;
+        const gint32 px[3] = { l->v[i], l->q[i], l->m[i] };
+
+        for (int t = 0; t < 3; t++)
+          {
+            gint32 *T = l->sat + t * sn;
+
+            /* column sum first, so no partial sum of q passes T[j] */
+            T[j] = px[t] + T[j - 1] + (T[j - sw] - T[j - sw - 1]);
+          }
+      }
+}
+
+/* sum of table t over the rectangle [x0,x1)x[y0,y1) */
+static inline gint64
+layer_rect_sum (const Layer *l, int t, int x0, int y0, int x1, int y1)
+{
+  int sw = l->w + 1;
+  const gint32 *T = l->sat + (size_t) t * sw * (l->h + 1);
+
+  return (gint64) T[y1 * sw + x1] - T[y0 * sw + x1] - T[y1 * sw + x0] + T[y0 * sw + x0];
 }
 
 static void
 layer_clear (Layer *l)
 {
-  g_clear_pointer (&l->v, g_free);
-  g_clear_pointer (&l->m, g_free);
+  for (int i = 0; i < 3; i++)
+    g_clear_pointer (&l->buf[i], g_free);
+  g_clear_pointer (&l->sat, g_free);
+  l->v = l->m = l->q = NULL;
 }
 
 static void
 layer_from_image (Layer *l, const guint8 *img, const guint8 *mask, int w, int h)
 {
   layer_init (l, w, h);
-  for (int i = 0; i < w * h; i++)
-    {
-      if (mask && !mask[i])
-        continue;
-      l->v[i] = (gint16) img[i] - 128;
-      l->m[i] = 1;
-    }
+  for (int y = 0; y < h; y++)
+    for (int x = 0; x < w; x++)
+      {
+        if (mask && !mask[y * w + x])
+          continue;
+        l->v[y * l->stride + x] = (gint16) img[y * w + x] - 128;
+        l->m[y * l->stride + x] = 1;
+      }
+  layer_finish (l);
 }
 
 /* rotate img by deg around its centre into a same-size layer; pixels whose
@@ -317,9 +422,10 @@ layer_rotated (Layer *l, const guint8 *img, int w, int h, double deg)
             fx * (1 - fy) * img[y0 * w + x0 + 1] +
             (1 - fx) * fy * img[(y0 + 1) * w + x0] +
             fx * fy * img[(y0 + 1) * w + x0 + 1];
-        l->v[y * w + x] = (gint16) lrint (v - 128.0);
-        l->m[y * w + x] = 1;
+        l->v[y * l->stride + x] = (gint16) lrint (v - 128.0);
+        l->m[y * l->stride + x] = 1;
       }
+  layer_finish (l);
 }
 
 /* 2x2 box downsample; a coarse pixel is valid only if all four are */
@@ -332,15 +438,264 @@ layer_half (Layer *l, const Layer *src)
   for (int y = 0; y < h; y++)
     for (int x = 0; x < w; x++)
       {
-        const gint16 *p = src->v + (2 * y) * src->w + 2 * x;
-        const guint8 *m = src->m + (2 * y) * src->w + 2 * x;
+        const gint16 *p = src->v + (2 * y) * src->stride + 2 * x;
+        const gint16 *m = src->m + (2 * y) * src->stride + 2 * x;
 
-        if (m[0] && m[1] && m[src->w] && m[src->w + 1])
+        if (m[0] && m[1] && m[src->stride] && m[src->stride + 1])
           {
-            l->v[y * w + x] = (p[0] + p[1] + p[src->w] + p[src->w + 1]) / 4;
-            l->m[y * w + x] = 1;
+            l->v[y * l->stride + x] = (p[0] + p[1] + p[src->stride] + p[src->stride + 1]) / 4;
+            l->m[y * l->stride + x] = 1;
           }
       }
+  layer_finish (l);
+}
+
+/* The NCC sums of a against b shifted by (dx, dy) over the rectangle
+ * [x0,x1)x[y0,y1) of a. Invalid pixels hold 0, so each one-sided sum only
+ * needs the other side's mask, and the loop has no branches. A row is at
+ * most a few hundred pixels, so its sums fit in 32 bits.
+ *
+ * With step > 1 the span is widened to whole steps. That is only exact when
+ * [x0,x1) is the full overlap of a and b: every pixel outside it is invalid
+ * on one side or the other, padding included. */
+static inline int
+layer_sums_general (const Layer *a, const Layer *b, int dx, int dy,
+                    int x0, int y0, int x1, int y1, const int step, gint64 s[5])
+{
+  int n = 0, extra;
+
+  s[0] = s[1] = s[2] = s[3] = s[4] = 0;
+  if (x1 <= x0)
+    return 0;
+  extra = (step - (x1 - x0) % step) % step;
+  x0 -= extra / 2;
+  x1 += extra - extra / 2;
+  for (int y = y0; y < y1; y++)
+    {
+      const gint16 *av = a->v + y * a->stride + x0;
+      const gint16 *am = a->m + y * a->stride + x0;
+      const gint16 *aq = a->q + y * a->stride + x0;
+      const gint16 *bv = b->v + (y - dy) * b->stride + (x0 - dx);
+      const gint16 *bm = b->m + (y - dy) * b->stride + (x0 - dx);
+      const gint16 *bq = b->q + (y - dy) * b->stride + (x0 - dx);
+      gint32 sa = 0, sb = 0, saa = 0, sbb = 0, sab = 0, rn = 0;
+
+      for (int xs = 0; xs < x1 - x0; xs += step)
+        for (int x = xs; x < xs + step; x++)
+          {
+            sa += av[x] * bm[x];
+            sb += bv[x] * am[x];
+            saa += aq[x] * bm[x];
+            sbb += bq[x] * am[x];
+            sab += av[x] * bv[x];
+            rn += am[x] * bm[x];
+          }
+      s[0] += sa;
+      s[1] += sb;
+      s[2] += saa;
+      s[3] += sbb;
+      s[4] += sab;
+      n += rn;
+    }
+  return n;
+}
+
+/* The fast path pads rows to whole blocks; a literal block length lets the
+ * compiler unroll the inner loop at any vector width. */
+#define BLOCK 32
+G_STATIC_ASSERT (PAD >= BLOCK / 2);
+
+#ifdef ELANPRESS_SSE2
+/* GCC at -O2 adds every block of the loop below down to one number before
+ * starting the next, which costs about as much as the block itself. These
+ * copies keep per-lane sums in registers instead. Each product is at most
+ * 128 * 128 and both layers have tables, so a window holds at most
+ * TABLE_MAX_PIXELS pixels, and neither a 32-bit lane nor the 32-bit total
+ * SUMS_ADD returns can pass 2^31. */
+
+static inline gint32
+hsum128 (__m128i x)
+{
+  x = _mm_add_epi32 (x, _mm_shuffle_epi32 (x, 0x4e));
+  x = _mm_add_epi32 (x, _mm_shuffle_epi32 (x, 0xb1));
+  return _mm_cvtsi128_si32 (x);
+}
+
+#define SUMS_NAME cross_sums_sse2
+#define SUMS_ATTR
+#define SUMS_VEC __m128i
+#define SUMS_W 8
+#define SUMS_ZERO _mm_setzero_si128 ()
+#define SUMS_LOAD(p) _mm_loadu_si128 ((const void *) (p))
+#define SUMS_DOT(acc, x, y) _mm_add_epi32 (acc, _mm_madd_epi16 (x, y))
+#define SUMS_ADD(acc) hsum128 (acc)
+#include "elanpress-match-sums.h"
+
+#ifdef ELANPRESS_DISPATCH
+/* Distributions build for baseline x86-64, so the loop also comes in AVX2
+ * and AVX-512 copies, picked by the CPU at run time. */
+#define SUMS_NAME cross_sums_avx2
+#define SUMS_ATTR __attribute__((target ("avx2")))
+#define SUMS_VEC __m256i
+#define SUMS_W 16
+#define SUMS_ZERO _mm256_setzero_si256 ()
+#define SUMS_LOAD(p) _mm256_loadu_si256 ((const void *) (p))
+#define SUMS_DOT(acc, x, y) _mm256_add_epi32 (acc, _mm256_madd_epi16 (x, y))
+#define SUMS_ADD(acc) \
+  hsum128 (_mm_add_epi32 (_mm256_castsi256_si128 (acc), \
+                          _mm256_extracti128_si256 (acc, 1)))
+#include "elanpress-match-sums.h"
+
+#define SUMS_NAME cross_sums_avx512
+#define SUMS_ATTR __attribute__((target ("avx512bw")))
+#define SUMS_VEC __m512i
+#define SUMS_W 32
+#define SUMS_ZERO _mm512_setzero_si512 ()
+#define SUMS_LOAD(p) _mm512_loadu_si512 ((const void *) (p))
+#define SUMS_DOT(acc, x, y) _mm512_add_epi32 (acc, _mm512_madd_epi16 (x, y))
+#define SUMS_ADD(acc) _mm512_reduce_add_epi32 (acc)
+#include "elanpress-match-sums.h"
+
+/* 1 for SSE2, 2 for AVX2, 3 for AVX-512. FP_ELANPRESS_SIMD=sse2, avx2 or
+ * avx512 caps it, so every copy can run on a newer CPU. */
+static int
+cross_sums_level (void)
+{
+  static gsize level = 0;
+
+  if (g_once_init_enter (&level))
+    {
+      const char *cap = g_getenv ("FP_ELANPRESS_SIMD");
+      gsize l = 1;
+
+      if (__builtin_cpu_supports ("avx512bw"))
+        l = 3;
+      else if (__builtin_cpu_supports ("avx2"))
+        l = 2;
+      if (g_ascii_strcasecmp (cap ? cap : "", "sse2") == 0)
+        l = 1;
+      else if (g_ascii_strcasecmp (cap ? cap : "", "avx2") == 0)
+        l = MIN (l, 2);
+      else if (cap && *cap && g_ascii_strcasecmp (cap, "avx512") != 0)
+        g_message ("FP_ELANPRESS_SIMD=%s not recognised, expected sse2, avx2 or avx512", cap);
+      g_once_init_leave (&level, l);
+    }
+  return (int) level;
+}
+
+static void
+cross_sums (const Layer *a, const Layer *b, int dx, int dy,
+            int x0, int y0, int x1, int y1, const gboolean fulla, gint64 s[5])
+{
+  switch (cross_sums_level ())
+    {
+    case 3:
+      cross_sums_avx512 (a, b, dx, dy, x0, y0, x1, y1, fulla, s);
+      break;
+
+    case 2:
+      cross_sums_avx2 (a, b, dx, dy, x0, y0, x1, y1, fulla, s);
+      break;
+
+    default:
+      cross_sums_sse2 (a, b, dx, dy, x0, y0, x1, y1, fulla, s);
+    }
+}
+#else
+static void
+cross_sums (const Layer *a, const Layer *b, int dx, int dy,
+            int x0, int y0, int x1, int y1, const gboolean fulla, gint64 s[5])
+{
+  cross_sums_sse2 (a, b, dx, dy, x0, y0, x1, y1, fulla, s);
+}
+#endif
+#endif
+
+/* When b is valid everywhere, the sums of a alone and the pixel count are
+ * rectangle sums over a, and only the three terms with b stay in the loop.
+ * When a is valid everywhere too, only the cross term does. */
+static inline int
+layer_sums_fullb (const Layer *a, const Layer *b, int dx, int dy,
+                  int x0, int y0, int x1, int y1, const gboolean fulla,
+                  gint64 s[5])
+{
+  int extra, n;
+
+  s[0] = layer_rect_sum (a, 0, x0, y0, x1, y1);
+  s[2] = layer_rect_sum (a, 1, x0, y0, x1, y1);
+  n = (int) layer_rect_sum (a, 2, x0, y0, x1, y1);
+  s[1] = s[3] = s[4] = 0;
+  if (fulla)
+    {
+      s[1] = layer_rect_sum (b, 0, x0 - dx, y0 - dy, x1 - dx, y1 - dy);
+      s[3] = layer_rect_sum (b, 1, x0 - dx, y0 - dy, x1 - dx, y1 - dy);
+    }
+  extra = (BLOCK - (x1 - x0) % BLOCK) % BLOCK;
+  x0 -= extra / 2;
+  x1 += extra - extra / 2;
+#ifdef ELANPRESS_SSE2
+  cross_sums (a, b, dx, dy, x0, y0, x1, y1, fulla, s);
+#else
+  for (int y = y0; y < y1; y++)
+    {
+      const gint16 *av = a->v + y * a->stride + x0;
+      const gint16 *am = a->m + y * a->stride + x0;
+      const gint16 *bv = b->v + (y - dy) * b->stride + (x0 - dx);
+      const gint16 *bq = b->q + (y - dy) * b->stride + (x0 - dx);
+      gint32 sb = 0, sbb = 0, sab = 0;
+
+      if (fulla)
+        {
+          for (int xs = 0; xs < x1 - x0; xs += BLOCK)
+            for (int x = xs; x < xs + BLOCK; x++)
+              sab += av[x] * bv[x];
+        }
+      else
+        {
+          for (int xs = 0; xs < x1 - x0; xs += BLOCK)
+            for (int x = xs; x < xs + BLOCK; x++)
+              {
+                sb += bv[x] * am[x];
+                sbb += bq[x] * am[x];
+                sab += av[x] * bv[x];
+              }
+        }
+      s[1] += sb;
+      s[3] += sbb;
+      s[4] += sab;
+    }
+#endif
+  return n;
+}
+
+/* Takes the table path when both layers have tables and b is full:
+ * layer_sums_fullb() assumes that every pixel of b is valid. */
+static inline int
+layer_sums (const Layer *a, const Layer *b, int dx, int dy,
+            int x0, int y0, int x1, int y1, const int step, gint64 s[5])
+{
+  if (step == 1 || !a->sat || !b->sat || !b->full)
+    return layer_sums_general (a, b, dx, dy, x0, y0, x1, y1, step, s);
+  if (x1 <= x0 || y1 <= y0)
+    {
+      s[0] = s[1] = s[2] = s[3] = s[4] = 0;
+      return 0;
+    }
+  return layer_sums_fullb (a, b, dx, dy, x0, y0, x1, y1,
+                           a->full, s);
+}
+
+static double
+ncc_from_sums (const gint64 s[5], int n)
+{
+  double ma = (double) s[0] / n, mb = (double) s[1] / n;
+  double va = (double) s[2] / n - ma * ma;
+  double vb = (double) s[3] / n - mb * mb;
+  double cov = (double) s[4] / n - ma * mb;
+
+  if (va <= 1e-9 || vb <= 1e-9)
+    return -2.0;
+  return cov / sqrt (va * vb);
 }
 
 /* NCC of a (fixed) against b shifted by (dx, dy): a(x, y) pairs with
@@ -351,50 +706,20 @@ layer_ncc (const Layer *a, const Layer *b, int dx, int dy, int min_n,
 {
   int x0 = MAX (0, dx), x1 = MIN (a->w, b->w + dx);
   int y0 = MAX (0, dy), y1 = MIN (a->h, b->h + dy);
-  gint64 sa = 0, sb = 0, saa = 0, sbb = 0, sab = 0;
-  int n = 0;
-  double ma, mb, va, vb, cov;
+  gint64 s[5];
+  int n;
 
   if (x1 - x0 <= 0 || y1 - y0 <= 0)
     return -2.0;
   if ((x1 - x0) * (y1 - y0) < min_n)
     return -2.0;
 
-  for (int y = y0; y < y1; y++)
-    {
-      const gint16 *av = a->v + y * a->w;
-      const guint8 *am = a->m + y * a->w;
-      const gint16 *bv = b->v + (y - dy) * b->w - dx;
-      const guint8 *bm = b->m + (y - dy) * b->w - dx;
-
-      for (int x = x0; x < x1; x++)
-        {
-          if (am[x] && bm[x])
-            {
-              int p = av[x], q = bv[x];
-              sa += p;
-              sb += q;
-              saa += p * p;
-              sbb += q * q;
-              sab += p * q;
-              n++;
-            }
-        }
-    }
-
+  n = layer_sums (a, b, dx, dy, x0, y0, x1, y1, VEC, s);
   if (n_out)
     *n_out = n;
   if (n < min_n)
     return -2.0;
-
-  ma = (double) sa / n;
-  mb = (double) sb / n;
-  va = (double) saa / n - ma * ma;
-  vb = (double) sbb / n - mb * mb;
-  cov = (double) sab / n - ma * mb;
-  if (va <= 1e-9 || vb <= 1e-9)
-    return -2.0;
-  return cov / sqrt (va * vb);
+  return ncc_from_sums (s, n);
 }
 
 /* NCC of a against shifted b restricted to the a-rectangle [x0,x1)x[y0,y1) */
@@ -402,43 +727,17 @@ static double
 layer_ncc_rect (const Layer *a, const Layer *b, int dx, int dy,
                 int x0, int y0, int x1, int y1, int min_n)
 {
-  gint64 sa = 0, sb = 0, saa = 0, sbb = 0, sab = 0;
-  int n = 0;
-  double ma, mb, va, vb, cov;
+  gint64 s[5];
+  int n;
 
   x0 = MAX (x0, MAX (0, dx));
   x1 = MIN (x1, MIN (a->w, b->w + dx));
   y0 = MAX (y0, MAX (0, dy));
   y1 = MIN (y1, MIN (a->h, b->h + dy));
-  for (int y = y0; y < y1; y++)
-    {
-      const gint16 *av = a->v + y * a->w;
-      const guint8 *am = a->m + y * a->w;
-      const gint16 *bv = b->v + (y - dy) * b->w - dx;
-      const guint8 *bm = b->m + (y - dy) * b->w - dx;
-
-      for (int x = x0; x < x1; x++)
-        if (am[x] && bm[x])
-          {
-            int p = av[x], q = bv[x];
-            sa += p;
-            sb += q;
-            saa += p * p;
-            sbb += q * q;
-            sab += p * q;
-            n++;
-          }
-    }
+  n = layer_sums (a, b, dx, dy, x0, y0, x1, y1, 1, s);
   if (n < min_n)
     return -2.0;
-  ma = (double) sa / n;
-  mb = (double) sb / n;
-  va = (double) saa / n - ma * ma;
-  vb = (double) sbb / n - mb * mb;
-  cov = (double) sab / n - ma * mb;
-  if (va <= 1e-9 || vb <= 1e-9)
-    return -2.0;
-  return cov / sqrt (va * vb);
+  return ncc_from_sums (s, n);
 }
 
 /* consistency of the peak alignment over a 3x3 grid of the overlap */
@@ -507,7 +806,14 @@ elanpress_probe_new (const guint8 *img, int w, int h,
         layer_rotated (&pr->full[i], img, w, h, pr->angles[i]);
       layer_half (&pr->half[i], &pr->full[i]);
       layer_half (&pr->quarter[i], &pr->half[i]);
+      layer_build_tables (&pr->full[i]);
+      layer_build_tables (&pr->half[i]);
+      layer_build_tables (&pr->quarter[i]);
     }
+#ifdef ELANPRESS_DISPATCH
+  /* read FP_ELANPRESS_SIMD here rather than in a match worker */
+  cross_sums_level ();
+#endif
   return pr;
 }
 
@@ -581,6 +887,10 @@ elanpress_probe_match_canvas (const ElanpressProbe *pr, const guint8 *px,
 
   layer_from_image (&tfull, px, mask, tw, th);
   layer_half (&thalf, &tfull);
+  if (tfull.full)
+    layer_build_tables (&tfull);
+  if (thalf.full)
+    layer_build_tables (&thalf);
   hw = thalf.w;
   hh = thalf.h;
   /* offsets range over every placement with any overlap */
@@ -617,6 +927,8 @@ elanpress_probe_match_canvas (const ElanpressProbe *pr, const guint8 *px,
       int qw, qh, min_n_quarter;
 
       layer_half (&tquarter, &thalf);
+      if (tquarter.full)
+        layer_build_tables (&tquarter);
       qw = tquarter.w;
       qh = tquarter.h;
       min_n_quarter = (int) (pr->p.min_overlap * pr->quarter[0].w * pr->quarter[0].h);
@@ -831,11 +1143,11 @@ canvas_paste (ElanpressCanvas *c, const guint8 *img, int w, int h,
       {
         int cx = x0 + x, cy = y0 + y;
 
-        if (!l.m[y * w + x])
+        if (!l.m[y * l.stride + x])
           continue;
         if (c->mask[cy * c->w + cx])
           continue;
-        c->px[cy * c->w + cx] = (guint8) (l.v[y * w + x] + 128);
+        c->px[cy * c->w + cx] = (guint8) (l.v[y * l.stride + x] + 128);
         c->mask[cy * c->w + cx] = 1;
       }
   layer_clear (&l);
