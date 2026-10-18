@@ -43,6 +43,10 @@ typedef struct
   double block_weight; /* score = (1-w) * peak + w * block_min */
   int    rot_prefilter; /* rank rotations at quarter resolution, search only
                          * the best this many at half/full; 0 = all */
+  int    coarse_peaks; /* with the rotation prefilter, score_mode 0 and an
+                        * unmasked template: search half resolution only
+                        * around this many quarter-resolution peaks per
+                        * rotation; 0 = every offset */
   double reg_thresh;   /* mosaic: registration score needed to merge an image */
   int    max_side;     /* mosaic: canvas side limit, px */
 } ElanpressMatchParams;
