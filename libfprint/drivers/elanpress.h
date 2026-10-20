@@ -54,14 +54,13 @@
 #define ELANPRESS_MIN_FRAMES 3
 #define ELANPRESS_MAX_FRAMES 14
 
-/* distinct images kept per touch (enroll) / used as probes (verify) */
-#define ELANPRESS_MAX_IMAGES_PER_TOUCH 3
+/* distinct images of a touch used as probes (verify); how many an enroll
+ * touch keeps is per device, see elanpress_devices[] */
 #define ELANPRESS_MAX_PROBES 3
-/* zero-shift similarity above which two frames of a touch are duplicates */
-#define ELANPRESS_DUP_SIMILARITY 0.85
 
-/* number of touches stored during enrollment */
+/* touches stored during enrollment, unless the device sets its own */
 #define ELANPRESS_ENROLL_STAGES 20
+#define ELANPRESS_MAX_ENROLL_STAGES 40
 
 /* a background frame is rejected (finger probably still on the pad) when
  * its mean is this far from the device's own calibration mean; this is the
@@ -86,19 +85,43 @@
 G_DECLARE_FINAL_TYPE (FpiDeviceElanPress, fpi_device_elanpress, FPI,
                       DEVICE_ELANPRESS, FpDevice);
 
-/* driver_data carries the per-device accept threshold x 1000. All values
- * are provisional: each was calibrated on one physical pad. 0c3d: 140-image
- * pool, one subject (0/91 impostor images accepted, ~60% of genuine
- * touches). 0c63: two subjects on one 80x80 pad; 0.76 admitted an unenrolled
- * finger there, 0.85 did not (see the merge request discussion). 0c6e: one
- * 150x52 pad, two people. 15 held-out touches of the enrolled finger scored
- * 0.848 to 0.954, 47 touches of five other fingers at most 0.761.
- * FP_ELANPRESS_THRESHOLD overrides any of them at runtime. */
-#define ELANPRESS_THRESHOLD(t) ((guint64) ((t) * 1000 + 0.5))
+/* Per-device defaults. Each set was measured on one physical pad and is
+ * provisional; FP_ELANPRESS_THRESHOLD, FP_ELANPRESS_ENROLL_STAGES,
+ * FP_ELANPRESS_IMAGES_PER_TOUCH and FP_ELANPRESS_DUP_SIMILARITY override
+ * them at runtime. driver_data indexes elanpress_devices[]. */
+typedef struct
+{
+  double threshold;        /* accept when the best score reaches this */
+  int    enroll_stages;    /* touches stored during enrollment */
+  int    images_per_touch; /* distinct images an enroll touch keeps */
+  double dup_similarity;   /* zero-shift similarity above which two frames
+                            * of a touch are duplicates */
+} ElanpressDeviceConfig;
+
+enum {
+  ELANPRESS_0C3D,
+  ELANPRESS_0C63,
+  ELANPRESS_0C6E,
+};
+
+static const ElanpressDeviceConfig elanpress_devices[] = {
+  /* 64x88. 140-image pool, one subject: 0/91 impostor images accepted, ~60%
+   * of genuine touches. Re-processing that pool's raw frames, one image per
+   * enroll touch instead of three accepted a fifth fewer genuine touches,
+   * and a 0.95 duplicate cutoff changed nothing. */
+  [ELANPRESS_0C3D] = { 0.76, 20, 3, 0.85 },
+  /* 80x80, two subjects on one pad: 0.76 admitted an unenrolled finger
+   * there, 0.85 did not (see the merge request discussion). */
+  [ELANPRESS_0C63] = { 0.85, 20, 3, 0.85 },
+  /* 150x52, two people. 15 held-out touches of the enrolled finger scored
+   * 0.848 to 0.954, 47 touches of four other fingers and a second person
+   * at most 0.761. */
+  [ELANPRESS_0C6E] = { 0.80, 20, 3, 0.85 },
+};
 
 static const FpIdEntry elanpress_id_table[] = {
-  {.vid = ELANPRESS_VEND_ID, .pid = 0x0c3d, .driver_data = ELANPRESS_THRESHOLD (0.76), },
-  {.vid = ELANPRESS_VEND_ID, .pid = 0x0c63, .driver_data = ELANPRESS_THRESHOLD (0.85), },
-  {.vid = ELANPRESS_VEND_ID, .pid = 0x0c6e, .driver_data = ELANPRESS_THRESHOLD (0.80), },
+  {.vid = ELANPRESS_VEND_ID, .pid = 0x0c3d, .driver_data = ELANPRESS_0C3D, },
+  {.vid = ELANPRESS_VEND_ID, .pid = 0x0c63, .driver_data = ELANPRESS_0C63, },
+  {.vid = ELANPRESS_VEND_ID, .pid = 0x0c6e, .driver_data = ELANPRESS_0C6E, },
   {.vid = 0, .pid = 0, },
 };

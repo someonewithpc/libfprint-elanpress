@@ -68,7 +68,11 @@ struct _FpiDeviceElanPress
   /* processed images collected during enrollment */
   GPtrArray *enroll_images;
   int        enroll_stage;
-  int        enroll_stages;
+
+  /* per-device settings, see elanpress_load_config () */
+  int    enroll_stages;
+  int    images_per_touch;
+  double dup_similarity;
 };
 
 G_DEFINE_TYPE (FpiDeviceElanPress, fpi_device_elanpress, FP_TYPE_DEVICE);
@@ -187,7 +191,7 @@ elanpress_process_touch (FpiDeviceElanPress *self, int max_keep)
         {
           double s = elanpress_similarity (p->img, g_ptr_array_index (keep, j), w, h);
 
-          if (s > ELANPRESS_DUP_SIMILARITY)
+          if (s > self->dup_similarity)
             {
               dup = TRUE;
               break;
@@ -764,7 +768,7 @@ elanpress_enroll_touch_done (FpiSsm *ssm, FpDevice *dev, GError *error)
       return;
     }
 
-  images = elanpress_process_touch (self, ELANPRESS_MAX_IMAGES_PER_TOUCH);
+  images = elanpress_process_touch (self, self->images_per_touch);
   elanpress_reset_capture (self);
 
   if (images->len == 0)
@@ -1019,6 +1023,32 @@ env_double_default (const char *name, double def)
   return end == v ? def : d;
 }
 
+/* The device's defaults from elanpress_devices[], or their env overrides */
+static void
+elanpress_load_config (FpiDeviceElanPress *self)
+{
+  FpDevice *dev = FP_DEVICE (self);
+  guint64 idx = fpi_device_get_driver_data (dev);
+  const ElanpressDeviceConfig *cfg;
+  double d;
+
+  g_assert (idx < G_N_ELEMENTS (elanpress_devices));
+  cfg = &elanpress_devices[idx];
+
+  /* elanpress_match_params_from_env () reads FP_ELANPRESS_THRESHOLD too,
+   * but falls back to the global default rather than the device's */
+  self->params.threshold = env_double_default ("FP_ELANPRESS_THRESHOLD",
+                                               cfg->threshold);
+  /* clamp before converting: out-of-range doubles do not fit an int */
+  d = env_double_default ("FP_ELANPRESS_ENROLL_STAGES", cfg->enroll_stages);
+  self->enroll_stages = (int) CLAMP (d, 1, ELANPRESS_MAX_ENROLL_STAGES);
+  d = env_double_default ("FP_ELANPRESS_IMAGES_PER_TOUCH", cfg->images_per_touch);
+  self->images_per_touch = (int) CLAMP (d, 1, ELANPRESS_MAX_FRAMES);
+  d = env_double_default ("FP_ELANPRESS_DUP_SIMILARITY", cfg->dup_similarity);
+  self->dup_similarity = CLAMP (d, 0.0, 1.0);
+  fpi_device_set_nr_enroll_stages (dev, self->enroll_stages);
+}
+
 static void
 elanpress_open (FpDevice *dev)
 {
@@ -1034,14 +1064,10 @@ elanpress_open (FpDevice *dev)
     }
 
   elanpress_match_params_from_env (&self->params);
-  if (fpi_device_get_driver_data (dev) != 0 && !g_getenv ("FP_ELANPRESS_THRESHOLD"))
-    self->params.threshold = fpi_device_get_driver_data (dev) / 1000.0;
+  elanpress_load_config (self);
   self->min_mean = env_double_default ("FP_ELANPRESS_MIN_MEAN", ELANPRESS_MIN_MEAN);
   self->min_contrast = env_double_default ("FP_ELANPRESS_MIN_CONTRAST", ELANPRESS_MIN_CONTRAST);
   self->min_coverage = env_double_default ("FP_ELANPRESS_MIN_COVERAGE", ELANPRESS_MIN_COVERAGE);
-  self->enroll_stages = (int) env_double_default ("FP_ELANPRESS_ENROLL_STAGES", ELANPRESS_ENROLL_STAGES);
-  self->enroll_stages = CLAMP (self->enroll_stages, 1, 40);
-  fpi_device_set_nr_enroll_stages (dev, self->enroll_stages);
 
   dump = g_getenv ("FP_ELANPRESS_DUMP_DIR");
   if (dump && g_file_test (dump, G_FILE_TEST_IS_DIR))
@@ -1054,10 +1080,12 @@ elanpress_open (FpDevice *dev)
     }
 
   fp_dbg ("threshold %.3f rot +/-%.0f step %.0f min_overlap %.2f norm_win %d, "
-          "gates mean>%.0f contrast>%.0f coverage>%.2f, %d enroll stages",
+          "gates mean>%.0f contrast>%.0f coverage>%.2f, %d enroll stages "
+          "keeping %d images per touch, duplicates above %.2f",
           self->params.threshold, self->params.rot_range, self->params.rot_step,
           self->params.min_overlap, self->params.norm_win, self->min_mean,
-          self->min_contrast, self->min_coverage, self->enroll_stages);
+          self->min_contrast, self->min_coverage, self->enroll_stages,
+          self->images_per_touch, self->dup_similarity);
 
   fpi_ssm_start (fpi_ssm_new (dev, open_run_state, OPEN_NUM_STATES),
                  open_complete);
