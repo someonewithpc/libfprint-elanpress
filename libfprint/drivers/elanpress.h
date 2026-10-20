@@ -100,6 +100,7 @@ typedef struct
 
 enum {
   ELANPRESS_0C3D,
+  ELANPRESS_0C4B,
   ELANPRESS_0C63,
   ELANPRESS_0C6E,
 };
@@ -110,6 +111,10 @@ static const ElanpressDeviceConfig elanpress_devices[] = {
    * enroll touch instead of three accepted a fifth fewer genuine touches,
    * and a 0.95 duplicate cutoff changed nothing. */
   [ELANPRESS_0C3D] = { 0.76, 20, 3, 0.85 },
+  /* 80x80, one subject. With 40 enroll touches 15/16 genuine touches were
+   * accepted (0.894 to 0.970) and 0/12 impostor touches (at most 0.758);
+   * with 20, 2/4 genuine. */
+  [ELANPRESS_0C4B] = { 0.85, 40, 3, 0.85 },
   /* 80x80, two subjects on one pad: 0.76 admitted an unenrolled finger
    * there, 0.85 did not (see the merge request discussion). */
   [ELANPRESS_0C63] = { 0.85, 20, 3, 0.85 },
@@ -124,6 +129,7 @@ static const ElanpressDeviceConfig elanpress_devices[] = {
 
 static const FpIdEntry elanpress_id_table[] = {
   {.vid = ELANPRESS_VEND_ID, .pid = 0x0c3d, .driver_data = ELANPRESS_0C3D, },
+  {.vid = ELANPRESS_VEND_ID, .pid = 0x0c4b, .driver_data = ELANPRESS_0C4B, },
   {.vid = ELANPRESS_VEND_ID, .pid = 0x0c63, .driver_data = ELANPRESS_0C63, },
   {.vid = ELANPRESS_VEND_ID, .pid = 0x0c6e, .driver_data = ELANPRESS_0C6E, },
   {.vid = 0, .pid = 0, },
