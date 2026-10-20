@@ -1023,7 +1023,9 @@ env_double_default (const char *name, double def)
   return end == v ? def : d;
 }
 
-/* The device's defaults from elanpress_devices[], or their env overrides */
+/* The device's defaults from elanpress_devices[], or their env overrides.
+ * Probe applies them too, so the number of enroll stages is right before
+ * the device is first opened. */
 static void
 elanpress_load_config (FpiDeviceElanPress *self)
 {
@@ -1047,6 +1049,13 @@ elanpress_load_config (FpiDeviceElanPress *self)
   d = env_double_default ("FP_ELANPRESS_DUP_SIMILARITY", cfg->dup_similarity);
   self->dup_similarity = CLAMP (d, 0.0, 1.0);
   fpi_device_set_nr_enroll_stages (dev, self->enroll_stages);
+}
+
+static void
+elanpress_probe (FpDevice *dev)
+{
+  elanpress_load_config (FPI_DEVICE_ELANPRESS (dev));
+  fpi_device_probe_complete (dev, NULL, NULL, NULL);
 }
 
 static void
@@ -1148,6 +1157,7 @@ fpi_device_elanpress_class_init (FpiDeviceElanPressClass *klass)
    * thermal model only ever tripped on its own retry loops */
   dev_class->temp_hot_seconds = -1;
 
+  dev_class->probe = elanpress_probe;
   dev_class->open = elanpress_open;
   dev_class->close = elanpress_close;
   dev_class->enroll = elanpress_enroll;
