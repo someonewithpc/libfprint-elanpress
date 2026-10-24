@@ -264,6 +264,60 @@ test_probe_rotation_count (void)
   elanpress_probe_free (pr);
 }
 
+/* the probe of a random image matched against the image itself */
+static ElanpressMatchResult
+match_self (double min_overlap)
+{
+  g_autoptr(GRand) r = g_rand_new_with_seed (1);
+  g_autofree guint8 *img = g_malloc (64 * 88);
+  ElanpressMatchParams p;
+  ElanpressMatchResult res;
+  ElanpressProbe *pr;
+
+  for (int i = 0; i < 64 * 88; i++)
+    img[i] = g_rand_int_range (r, 0, 256);
+  elanpress_match_params_default (&p);
+  p.min_overlap = min_overlap;
+  pr = elanpress_probe_new (img, 64, 88, &p);
+  elanpress_probe_match (pr, img, &res);
+  elanpress_probe_free (pr);
+  return res;
+}
+
+static void
+test_env_min_overlap_fraction (void)
+{
+  ElanpressMatchParams p;
+  ElanpressMatchResult res;
+
+  g_setenv ("FP_ELANPRESS_MIN_OVERLAP", "1e30", TRUE);
+  elanpress_match_params_from_env (&p);
+  g_assert_cmpfloat (p.min_overlap, ==, 2.0);
+
+  g_setenv ("FP_ELANPRESS_MIN_OVERLAP", "1.5", TRUE);
+  elanpress_match_params_from_env (&p);
+  g_assert_cmpfloat (p.min_overlap, ==, 1.5);
+
+  g_setenv ("FP_ELANPRESS_MIN_OVERLAP", "-1e30", TRUE);
+  elanpress_match_params_from_env (&p);
+  g_assert_cmpfloat (p.min_overlap, ==, 0.0);
+
+  g_setenv ("FP_ELANPRESS_MIN_OVERLAP", "0.3", TRUE);
+  elanpress_match_params_from_env (&p);
+  g_assert_cmpfloat (p.min_overlap, ==, 0.3);
+
+  g_unsetenv ("FP_ELANPRESS_MIN_OVERLAP");
+
+  /* the matcher runs at both clamped values: at 2 no placement overlaps
+   * enough, and at 0 its floor of 64 overlapping pixels still keeps out the
+   * corners whose correlation is 1 or -1, so the true placement wins */
+  res = match_self (2.0);
+  g_assert_cmpint (res.overlap, ==, 0);
+  g_assert_cmpfloat (res.score, <, -1.0);
+  res = match_self (0.0);
+  g_assert_cmpint (res.overlap, ==, 64 * 88);
+}
+
 int
 main (int argc, char *argv[])
 {
@@ -295,6 +349,8 @@ main (int argc, char *argv[])
                    test_env_rotation_bounded);
   g_test_add_func ("/elanpress/probe/rotation-count",
                    test_probe_rotation_count);
+  g_test_add_func ("/elanpress/env/min-overlap-fraction",
+                   test_env_min_overlap_fraction);
 
   return g_test_run ();
 }

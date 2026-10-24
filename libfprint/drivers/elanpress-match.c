@@ -129,8 +129,10 @@ elanpress_match_params_from_env (ElanpressMatchParams *p)
     p->rot_range = CLAMP (d, 0, ELANPRESS_MAX_ROT_RANGE);
   if (elanpress_env_double ("FP_ELANPRESS_ROT_STEP", &d) && d > 0)
     p->rot_step = MAX (d, ELANPRESS_MIN_ROT_STEP);
-  if (elanpress_env_double ("FP_ELANPRESS_MIN_OVERLAP", &d) && d > 0 && d <= 1)
-    p->min_overlap = d;
+  /* a fraction of the frame, multiplied by its area and cast to int. At 2
+   * the threshold is already twice the frame, which no overlap reaches */
+  if (elanpress_env_double ("FP_ELANPRESS_MIN_OVERLAP", &d))
+    p->min_overlap = CLAMP (d, 0.0, 2.0);
   if (env_int ("FP_ELANPRESS_NORM_WIN", 3, G_MAXINT, &i))
     p->norm_win = i | 1;
   if (env_int ("FP_ELANPRESS_CANDIDATES", 1, ELANPRESS_MAX_CANDIDATES, &i))
