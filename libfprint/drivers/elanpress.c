@@ -1091,7 +1091,7 @@ elanpress_open (FpDevice *dev)
       fp_dbg ("dumping frames to %s (session %s)", self->dump_dir, self->dump_session);
     }
 
-  fp_dbg ("threshold %.3f rot +/-%.0f step %.0f min_overlap %.2f norm_win %d, "
+  fp_dbg ("threshold %.3f rot +/-%g step %g min_overlap %.2f norm_win %d, "
           "gates mean>%.0f contrast>%.0f coverage>%.2f, %d enroll stages "
           "keeping %d images per touch, duplicates above %.2f",
           self->params.threshold, self->params.rot_range, self->params.rot_step,

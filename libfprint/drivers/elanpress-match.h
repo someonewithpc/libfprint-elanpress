@@ -76,6 +76,13 @@ typedef struct
   int    overlap;      /* pixels that took part in the score */
 } ElanpressMatchResult;
 
+/* bounds on FP_ELANPRESS_ROT_RANGE and _ROT_STEP, degrees; at most 181
+ * rotations against 15 by default. Each keeps a full, half and quarter
+ * layer of about 4 bytes per frame pixel, about 5.5 MB per probe on a
+ * 150x52 pad */
+#define ELANPRESS_MAX_ROT_RANGE 90.0
+#define ELANPRESS_MIN_ROT_STEP 1.0
+
 /* each candidate is refined at full resolution and the array is sized by
  * the count, so FP_ELANPRESS_CANDIDATES stops here; the default is 4 */
 #define ELANPRESS_MAX_CANDIDATES 64
@@ -138,6 +145,9 @@ ElanpressProbe *elanpress_probe_new (const guint8               *img,
                                      int                         h,
                                      const ElanpressMatchParams *p);
 void      elanpress_probe_free (ElanpressProbe *probe);
+
+/* rotated copies of the probe the search goes through */
+int       elanpress_probe_n_rotations (const ElanpressProbe *probe);
 
 /* best correlation of the probe against one template image */
 double    elanpress_probe_match (const ElanpressProbe *probe,

@@ -236,6 +236,75 @@ test_env_int_settings_fit (void)
     g_unsetenv (int_settings[i]);
 }
 
+static void
+test_env_rotation_bounded (void)
+{
+  ElanpressMatchParams def, p;
+
+  elanpress_match_params_default (&def);
+
+  g_setenv ("FP_ELANPRESS_ROT_RANGE", "-1", TRUE);
+  g_setenv ("FP_ELANPRESS_ROT_STEP", "1e-30", TRUE);
+  elanpress_match_params_from_env (&p);
+  g_assert_cmpfloat (p.rot_range, ==, 0);
+  g_assert_cmpfloat (p.rot_step, ==, ELANPRESS_MIN_ROT_STEP);
+
+  g_setenv ("FP_ELANPRESS_ROT_RANGE", "1e30", TRUE);
+  g_setenv ("FP_ELANPRESS_ROT_STEP", "0", TRUE);
+  elanpress_match_params_from_env (&p);
+  g_assert_cmpfloat (p.rot_range, ==, ELANPRESS_MAX_ROT_RANGE);
+  g_assert_cmpfloat (p.rot_step, ==, def.rot_step);
+
+  /* a negative step is ignored too, not raised to the minimum */
+  g_setenv ("FP_ELANPRESS_ROT_STEP", "-5", TRUE);
+  elanpress_match_params_from_env (&p);
+  g_assert_cmpfloat (p.rot_step, ==, def.rot_step);
+
+  g_setenv ("FP_ELANPRESS_ROT_RANGE", "20", TRUE);
+  g_setenv ("FP_ELANPRESS_ROT_STEP", "2.5", TRUE);
+  elanpress_match_params_from_env (&p);
+  g_assert_cmpfloat (p.rot_range, ==, 20);
+  g_assert_cmpfloat (p.rot_step, ==, 2.5);
+
+  g_unsetenv ("FP_ELANPRESS_ROT_RANGE");
+  g_unsetenv ("FP_ELANPRESS_ROT_STEP");
+}
+
+/* the bounds above are what limit the probe's rotated copies, when the
+ * settings come from the environment */
+static void
+test_probe_rotation_count (void)
+{
+  g_autofree guint8 *img = g_malloc0 (64 * 88);
+  ElanpressMatchParams p;
+  ElanpressProbe *pr;
+
+  elanpress_match_params_default (&p);
+  pr = elanpress_probe_new (img, 64, 88, &p);
+  g_assert_cmpint (elanpress_probe_n_rotations (pr), ==, 15);
+  elanpress_probe_free (pr);
+
+  g_setenv ("FP_ELANPRESS_ROT_RANGE", "1e9", TRUE);
+  g_setenv ("FP_ELANPRESS_ROT_STEP", "1e-9", TRUE);
+  elanpress_match_params_from_env (&p);
+  g_unsetenv ("FP_ELANPRESS_ROT_RANGE");
+  g_unsetenv ("FP_ELANPRESS_ROT_STEP");
+  pr = elanpress_probe_new (img, 64, 88, &p);
+  g_assert_cmpint (elanpress_probe_n_rotations (pr), ==, 181);
+  elanpress_probe_free (pr);
+
+  p.rot_range = ELANPRESS_MAX_ROT_RANGE;
+  p.rot_step = ELANPRESS_MIN_ROT_STEP;
+  pr = elanpress_probe_new (img, 64, 88, &p);
+  g_assert_cmpint (elanpress_probe_n_rotations (pr), ==, 181);
+  elanpress_probe_free (pr);
+
+  p.rot_range = 0;
+  pr = elanpress_probe_new (img, 64, 88, &p);
+  g_assert_cmpint (elanpress_probe_n_rotations (pr), ==, 1);
+  elanpress_probe_free (pr);
+}
+
 int
 main (int argc, char *argv[])
 {
@@ -264,6 +333,10 @@ main (int argc, char *argv[])
   g_test_add_func ("/elanpress/env/params-not-finite", test_env_params_not_finite);
   g_test_add_func ("/elanpress/env/int-settings-fit",
                    test_env_int_settings_fit);
+  g_test_add_func ("/elanpress/env/rotation-bounded",
+                   test_env_rotation_bounded);
+  g_test_add_func ("/elanpress/probe/rotation-count",
+                   test_probe_rotation_count);
 
   return g_test_run ();
 }

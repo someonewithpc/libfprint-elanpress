@@ -96,10 +96,11 @@ elanpress_match_params_from_env (ElanpressMatchParams *p)
   elanpress_match_params_default (p);
   if (elanpress_env_double ("FP_ELANPRESS_THRESHOLD", &d))
     p->threshold = d;
+  /* range / step sets how many rotated copies of the probe are made */
   if (elanpress_env_double ("FP_ELANPRESS_ROT_RANGE", &d))
-    p->rot_range = d;
+    p->rot_range = CLAMP (d, 0, ELANPRESS_MAX_ROT_RANGE);
   if (elanpress_env_double ("FP_ELANPRESS_ROT_STEP", &d) && d > 0)
-    p->rot_step = d;
+    p->rot_step = MAX (d, ELANPRESS_MIN_ROT_STEP);
   if (elanpress_env_double ("FP_ELANPRESS_MIN_OVERLAP", &d))
     p->min_overlap = d;
   if (env_int ("FP_ELANPRESS_NORM_WIN", 3, G_MAXINT, &i))
@@ -577,6 +578,12 @@ elanpress_probe_free (ElanpressProbe *pr)
   g_free (pr->quarter);
   g_free (pr->angles);
   g_free (pr);
+}
+
+int
+elanpress_probe_n_rotations (const ElanpressProbe *pr)
+{
+  return pr->n_rot;
 }
 
 typedef struct
