@@ -85,6 +85,11 @@ typedef struct _ElanpressProbe ElanpressProbe;
 void      elanpress_match_params_default (ElanpressMatchParams *p);
 void      elanpress_match_params_from_env (ElanpressMatchParams *p);
 
+/* a number from the environment; FALSE, leaving *out alone, when the
+ * variable is unset, not a number or not finite */
+gboolean  elanpress_env_double (const char *name,
+                                double     *out);
+
 /* wire format -> row-major 16-bit frame */
 void      elanpress_rotate_frame (const guint8 *raw,
                                   guint16      *out,

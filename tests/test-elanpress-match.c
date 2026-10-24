@@ -99,10 +99,46 @@ test_nan_gate_rejects_nothing (void)
   g_assert_true (elanpress_quality_passes (&q, &nan_gates));
 }
 
+static void
+test_env_double (void)
+{
+  const char *rejected[] = {
+    "", "abc", "nan", "NAN", "inf", "-inf", "1e999", "-1e999",
+  };
+  double d = 7;
+
+  g_unsetenv ("FP_ELANPRESS_TEST");
+  g_assert_false (elanpress_env_double ("FP_ELANPRESS_TEST", &d));
+  for (guint i = 0; i < G_N_ELEMENTS (rejected); i++)
+    {
+      g_setenv ("FP_ELANPRESS_TEST", rejected[i], TRUE);
+      g_assert_false (elanpress_env_double ("FP_ELANPRESS_TEST", &d));
+    }
+  g_assert_cmpfloat (d, ==, 7);
+
+  g_setenv ("FP_ELANPRESS_TEST", "0.85", TRUE);
+  g_assert_true (elanpress_env_double ("FP_ELANPRESS_TEST", &d));
+  g_assert_cmpfloat (d, ==, 0.85);
+
+  /* text after the number has always been ignored; keep it that way */
+  g_setenv ("FP_ELANPRESS_TEST", "0.5x", TRUE);
+  g_assert_true (elanpress_env_double ("FP_ELANPRESS_TEST", &d));
+  g_assert_cmpfloat (d, ==, 0.5);
+  g_unsetenv ("FP_ELANPRESS_TEST");
+}
+
 int
 main (int argc, char *argv[])
 {
+  g_auto(GStrv) names = g_listenv ();
+
   g_test_init (&argc, &argv, NULL);
+
+  /* each test sets the FP_ELANPRESS_* variables it needs, and one exported
+   * by whoever runs the tests would change what the others read */
+  for (guint i = 0; names[i]; i++)
+    if (g_str_has_prefix (names[i], "FP_ELANPRESS_"))
+      g_unsetenv (names[i]);
 
   g_test_add_func ("/elanpress/contrast-bar/landing-frame",
                    test_landing_frame_sets_no_bar);
@@ -114,6 +150,8 @@ main (int argc, char *argv[])
                    test_no_frame_passes);
   g_test_add_func ("/elanpress/quality/nan-gate",
                    test_nan_gate_rejects_nothing);
+
+  g_test_add_func ("/elanpress/env/double", test_env_double);
 
   return g_test_run ();
 }
