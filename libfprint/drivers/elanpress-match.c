@@ -101,10 +101,25 @@ elanpress_env_double (const char *name, double *out)
   return TRUE;
 }
 
+/* an integer setting; values under min are ignored, as before, and the rest
+ * are clamped to max while still a double, since a double past G_MAXINT
+ * does not fit an int */
+static gboolean
+env_int (const char *name, int min, int max, int *out)
+{
+  double d;
+
+  if (!elanpress_env_double (name, &d) || d < min)
+    return FALSE;
+  *out = (int) MIN (d, max);
+  return TRUE;
+}
+
 void
 elanpress_match_params_from_env (ElanpressMatchParams *p)
 {
   double d;
+  int i;
 
   elanpress_match_params_default (p);
   if (elanpress_env_double ("FP_ELANPRESS_THRESHOLD", &d))
@@ -115,24 +130,24 @@ elanpress_match_params_from_env (ElanpressMatchParams *p)
     p->rot_step = d;
   if (elanpress_env_double ("FP_ELANPRESS_MIN_OVERLAP", &d) && d > 0 && d <= 1)
     p->min_overlap = d;
-  if (elanpress_env_double ("FP_ELANPRESS_NORM_WIN", &d) && d >= 3)
-    p->norm_win = ((int) d) | 1;
-  if (elanpress_env_double ("FP_ELANPRESS_CANDIDATES", &d) && d >= 1)
-    p->candidates = (int) d;
+  if (env_int ("FP_ELANPRESS_NORM_WIN", 3, G_MAXINT, &i))
+    p->norm_win = i | 1;
+  if (env_int ("FP_ELANPRESS_CANDIDATES", 1, ELANPRESS_MAX_CANDIDATES, &i))
+    p->candidates = i;
   if (elanpress_env_double ("FP_ELANPRESS_SCORE_MODE", &d))
-    p->score_mode = CLAMP ((int) d, 0, 2);
-  if (elanpress_env_double ("FP_ELANPRESS_SIDELOBE_R", &d) && d >= 1)
-    p->sidelobe_r = (int) d;
+    p->score_mode = (int) CLAMP (d, 0, 2);
+  if (env_int ("FP_ELANPRESS_SIDELOBE_R", 1, G_MAXINT, &i))
+    p->sidelobe_r = i;
   if (elanpress_env_double ("FP_ELANPRESS_BLOCK_WEIGHT", &d))
     p->block_weight = CLAMP (d, 0.0, 1.0);
-  if (elanpress_env_double ("FP_ELANPRESS_ROT_PREFILTER", &d) && d >= 0)
-    p->rot_prefilter = (int) d;
-  if (elanpress_env_double ("FP_ELANPRESS_COARSE_PEAKS", &d) && d >= 0)
-    p->coarse_peaks = (int) MIN (d, 64);
+  if (env_int ("FP_ELANPRESS_ROT_PREFILTER", 0, G_MAXINT, &i))
+    p->rot_prefilter = i;
+  if (env_int ("FP_ELANPRESS_COARSE_PEAKS", 0, 64, &i))
+    p->coarse_peaks = i;
   if (elanpress_env_double ("FP_ELANPRESS_REG_THRESH", &d))
     p->reg_thresh = d;
-  if (elanpress_env_double ("FP_ELANPRESS_MAX_SIDE", &d) && d >= 64)
-    p->max_side = (int) d;
+  if (env_int ("FP_ELANPRESS_MAX_SIDE", 64, G_MAXINT, &i))
+    p->max_side = i;
 }
 
 /* ------------------------------------------------------- raw frames */
