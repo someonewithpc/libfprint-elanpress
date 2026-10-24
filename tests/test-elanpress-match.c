@@ -305,6 +305,67 @@ test_probe_rotation_count (void)
   elanpress_probe_free (pr);
 }
 
+/* the probe of a random image matched against the image itself */
+static ElanpressMatchResult
+match_self (double min_overlap)
+{
+  g_autoptr(GRand) r = g_rand_new_with_seed (1);
+  g_autofree guint8 *img = g_malloc (64 * 88);
+  ElanpressMatchParams p;
+  ElanpressMatchResult res;
+  ElanpressProbe *pr;
+
+  for (int i = 0; i < 64 * 88; i++)
+    img[i] = g_rand_int_range (r, 0, 256);
+  elanpress_match_params_default (&p);
+  p.min_overlap = min_overlap;
+  pr = elanpress_probe_new (img, 64, 88, &p);
+  elanpress_probe_match (pr, img, &res);
+  elanpress_probe_free (pr);
+  return res;
+}
+
+static void
+test_env_min_overlap_fraction (void)
+{
+  const char *ignored[] = { "1e30", "1.5", "1.0001", "0", "-1e30" };
+  ElanpressMatchParams def, p;
+  ElanpressMatchResult res;
+
+  elanpress_match_params_default (&def);
+  for (guint i = 0; i < G_N_ELEMENTS (ignored); i++)
+    {
+      g_setenv ("FP_ELANPRESS_MIN_OVERLAP", ignored[i], TRUE);
+      elanpress_match_params_from_env (&p);
+      g_assert_cmpfloat (p.min_overlap, ==, def.min_overlap);
+    }
+
+  g_setenv ("FP_ELANPRESS_MIN_OVERLAP", "1", TRUE);
+  elanpress_match_params_from_env (&p);
+  g_assert_cmpfloat (p.min_overlap, ==, 1.0);
+
+  g_setenv ("FP_ELANPRESS_MIN_OVERLAP", "0.3", TRUE);
+  elanpress_match_params_from_env (&p);
+  g_assert_cmpfloat (p.min_overlap, ==, 0.3);
+
+  g_setenv ("FP_ELANPRESS_MIN_OVERLAP", "1e-6", TRUE);
+  elanpress_match_params_from_env (&p);
+  g_assert_cmpfloat (p.min_overlap, ==, 1e-6);
+
+  /* the value that overflowed the cast reaches the matcher as the default */
+  g_setenv ("FP_ELANPRESS_MIN_OVERLAP", "1e30", TRUE);
+  elanpress_match_params_from_env (&p);
+  res = match_self (p.min_overlap);
+  g_assert_cmpint (res.overlap, ==, 64 * 88);
+
+  g_unsetenv ("FP_ELANPRESS_MIN_OVERLAP");
+
+  /* at the top of the range only the full overlap counts, and it is found */
+  res = match_self (1.0);
+  g_assert_cmpint (res.overlap, ==, 64 * 88);
+  g_assert_cmpfloat (res.score, >, 0.99);
+}
+
 int
 main (int argc, char *argv[])
 {
@@ -337,6 +398,8 @@ main (int argc, char *argv[])
                    test_env_rotation_bounded);
   g_test_add_func ("/elanpress/probe/rotation-count",
                    test_probe_rotation_count);
+  g_test_add_func ("/elanpress/env/min-overlap-fraction",
+                   test_env_min_overlap_fraction);
 
   return g_test_run ();
 }
