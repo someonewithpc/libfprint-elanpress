@@ -56,8 +56,8 @@ elanpress_match_params_default (ElanpressMatchParams *p)
   p->max_side = 256;
 }
 
-static gboolean
-env_double (const char *name, double *out)
+gboolean
+elanpress_env_double (const char *name, double *out)
 {
   const char *v = g_getenv (name);
   char *end;
@@ -66,7 +66,8 @@ env_double (const char *name, double *out)
   if (!v || !*v)
     return FALSE;
   d = g_ascii_strtod (v, &end);
-  if (end == v)
+  /* g_ascii_strtod () accepts "nan" and "inf", and overflows to inf */
+  if (end == v || !isfinite (d))
     return FALSE;
   *out = d;
   return TRUE;
@@ -78,29 +79,29 @@ elanpress_match_params_from_env (ElanpressMatchParams *p)
   double d;
 
   elanpress_match_params_default (p);
-  if (env_double ("FP_ELANPRESS_THRESHOLD", &d))
+  if (elanpress_env_double ("FP_ELANPRESS_THRESHOLD", &d))
     p->threshold = d;
-  if (env_double ("FP_ELANPRESS_ROT_RANGE", &d))
+  if (elanpress_env_double ("FP_ELANPRESS_ROT_RANGE", &d))
     p->rot_range = d;
-  if (env_double ("FP_ELANPRESS_ROT_STEP", &d) && d > 0)
+  if (elanpress_env_double ("FP_ELANPRESS_ROT_STEP", &d) && d > 0)
     p->rot_step = d;
-  if (env_double ("FP_ELANPRESS_MIN_OVERLAP", &d))
+  if (elanpress_env_double ("FP_ELANPRESS_MIN_OVERLAP", &d))
     p->min_overlap = d;
-  if (env_double ("FP_ELANPRESS_NORM_WIN", &d) && d >= 3)
+  if (elanpress_env_double ("FP_ELANPRESS_NORM_WIN", &d) && d >= 3)
     p->norm_win = ((int) d) | 1;
-  if (env_double ("FP_ELANPRESS_CANDIDATES", &d) && d >= 1)
+  if (elanpress_env_double ("FP_ELANPRESS_CANDIDATES", &d) && d >= 1)
     p->candidates = (int) d;
-  if (env_double ("FP_ELANPRESS_SCORE_MODE", &d))
+  if (elanpress_env_double ("FP_ELANPRESS_SCORE_MODE", &d))
     p->score_mode = CLAMP ((int) d, 0, 2);
-  if (env_double ("FP_ELANPRESS_SIDELOBE_R", &d) && d >= 1)
+  if (elanpress_env_double ("FP_ELANPRESS_SIDELOBE_R", &d) && d >= 1)
     p->sidelobe_r = (int) d;
-  if (env_double ("FP_ELANPRESS_BLOCK_WEIGHT", &d))
+  if (elanpress_env_double ("FP_ELANPRESS_BLOCK_WEIGHT", &d))
     p->block_weight = CLAMP (d, 0.0, 1.0);
-  if (env_double ("FP_ELANPRESS_ROT_PREFILTER", &d) && d >= 0)
+  if (elanpress_env_double ("FP_ELANPRESS_ROT_PREFILTER", &d) && d >= 0)
     p->rot_prefilter = (int) d;
-  if (env_double ("FP_ELANPRESS_REG_THRESH", &d))
+  if (elanpress_env_double ("FP_ELANPRESS_REG_THRESH", &d))
     p->reg_thresh = d;
-  if (env_double ("FP_ELANPRESS_MAX_SIDE", &d) && d >= 64)
+  if (elanpress_env_double ("FP_ELANPRESS_MAX_SIDE", &d) && d >= 64)
     p->max_side = (int) d;
 }
 
@@ -134,8 +135,8 @@ elanpress_frame_stats (const guint16 *frame, int w, int h,
   *stddev = sqrt (MAX (ss / n - (s / n) * (s / n), 0.0));
 }
 
-/* Written as the negation of the rejects, so a gate set to NaN from the
- * environment still rejects nothing, as it always has */
+/* Written as the negation of the rejects, so it matches the reject test it
+ * replaced exactly, NaN included */
 gboolean
 elanpress_quality_passes (const ElanpressQuality *q, const ElanpressGates *g)
 {

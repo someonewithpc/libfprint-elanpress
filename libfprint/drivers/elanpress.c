@@ -1021,14 +1021,9 @@ open_complete (FpiSsm *ssm, FpDevice *dev, GError *error)
 static double
 env_double_default (const char *name, double def)
 {
-  const char *v = g_getenv (name);
-  char *end;
   double d;
 
-  if (!v || !*v)
-    return def;
-  d = g_ascii_strtod (v, &end);
-  return end == v ? def : d;
+  return elanpress_env_double (name, &d) ? d : def;
 }
 
 /* The device's defaults from elanpress_devices[], or their env overrides.

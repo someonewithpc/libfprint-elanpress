@@ -19,6 +19,7 @@
 
 #include <glib.h>
 #include <math.h>
+#include <string.h>
 #include "elanpress-match.h"
 
 static const ElanpressGates gates = {
@@ -99,10 +100,76 @@ test_nan_gate_rejects_nothing (void)
   g_assert_true (elanpress_quality_passes (&q, &nan_gates));
 }
 
+static void
+test_env_double (void)
+{
+  const char *rejected[] = {
+    "", "abc", "nan", "NAN", "inf", "-inf", "1e999", "-1e999",
+  };
+  double d = 7;
+
+  g_unsetenv ("FP_ELANPRESS_TEST");
+  g_assert_false (elanpress_env_double ("FP_ELANPRESS_TEST", &d));
+  for (guint i = 0; i < G_N_ELEMENTS (rejected); i++)
+    {
+      g_setenv ("FP_ELANPRESS_TEST", rejected[i], TRUE);
+      g_assert_false (elanpress_env_double ("FP_ELANPRESS_TEST", &d));
+    }
+  g_assert_cmpfloat (d, ==, 7);
+
+  g_setenv ("FP_ELANPRESS_TEST", "0.85", TRUE);
+  g_assert_true (elanpress_env_double ("FP_ELANPRESS_TEST", &d));
+  g_assert_cmpfloat (d, ==, 0.85);
+
+  /* text after the number has always been ignored; keep it that way */
+  g_setenv ("FP_ELANPRESS_TEST", "0.5x", TRUE);
+  g_assert_true (elanpress_env_double ("FP_ELANPRESS_TEST", &d));
+  g_assert_cmpfloat (d, ==, 0.5);
+  g_unsetenv ("FP_ELANPRESS_TEST");
+}
+
+/* the matcher settings themselves keep their defaults for values that are
+ * not finite, which the old parser passed on to casts and comparisons */
+static void
+test_env_params_not_finite (void)
+{
+  const char *names[] = {
+    "FP_ELANPRESS_THRESHOLD", "FP_ELANPRESS_ROT_RANGE", "FP_ELANPRESS_ROT_STEP",
+    "FP_ELANPRESS_MIN_OVERLAP", "FP_ELANPRESS_NORM_WIN", "FP_ELANPRESS_CANDIDATES",
+    "FP_ELANPRESS_SCORE_MODE", "FP_ELANPRESS_SIDELOBE_R", "FP_ELANPRESS_BLOCK_WEIGHT",
+    "FP_ELANPRESS_ROT_PREFILTER", "FP_ELANPRESS_REG_THRESH", "FP_ELANPRESS_MAX_SIDE",
+  };
+  const char *values[] = { "nan", "inf", "-inf", "1e999" };
+
+  for (guint v = 0; v < G_N_ELEMENTS (values); v++)
+    {
+      ElanpressMatchParams def, p;
+
+      /* zeroed first so the padding compares equal too */
+      memset (&def, 0, sizeof def);
+      memset (&p, 0, sizeof p);
+      elanpress_match_params_default (&def);
+      for (guint i = 0; i < G_N_ELEMENTS (names); i++)
+        g_setenv (names[i], values[v], TRUE);
+      elanpress_match_params_from_env (&p);
+      for (guint i = 0; i < G_N_ELEMENTS (names); i++)
+        g_unsetenv (names[i]);
+      g_assert_cmpmem (&p, sizeof p, &def, sizeof def);
+    }
+}
+
 int
 main (int argc, char *argv[])
 {
+  g_auto(GStrv) names = g_listenv ();
+
   g_test_init (&argc, &argv, NULL);
+
+  /* each test sets the FP_ELANPRESS_* variables it needs, and one exported
+   * by whoever runs the tests would change what the others read */
+  for (guint i = 0; names[i]; i++)
+    if (g_str_has_prefix (names[i], "FP_ELANPRESS_"))
+      g_unsetenv (names[i]);
 
   g_test_add_func ("/elanpress/contrast-bar/landing-frame",
                    test_landing_frame_sets_no_bar);
@@ -114,6 +181,9 @@ main (int argc, char *argv[])
                    test_no_frame_passes);
   g_test_add_func ("/elanpress/quality/nan-gate",
                    test_nan_gate_rejects_nothing);
+
+  g_test_add_func ("/elanpress/env/double", test_env_double);
+  g_test_add_func ("/elanpress/env/params-not-finite", test_env_params_not_finite);
 
   return g_test_run ();
 }
