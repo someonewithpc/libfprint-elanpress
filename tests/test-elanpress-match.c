@@ -158,6 +158,84 @@ test_env_params_not_finite (void)
     }
 }
 
+static const char *int_settings[] = {
+  "FP_ELANPRESS_NORM_WIN", "FP_ELANPRESS_CANDIDATES",
+  "FP_ELANPRESS_SCORE_MODE", "FP_ELANPRESS_SIDELOBE_R",
+  "FP_ELANPRESS_ROT_PREFILTER", "FP_ELANPRESS_MAX_SIDE",
+};
+
+static void
+set_int_settings (const char *values[])
+{
+  for (guint i = 0; i < G_N_ELEMENTS (int_settings); i++)
+    g_setenv (int_settings[i], values[i], TRUE);
+}
+
+static void
+test_env_int_settings_fit (void)
+{
+  const char *huge[] = { "1e30", "1e30", "1e30", "1e30", "1e30", "1e30" };
+  const char *at_min[] = { "3", "1", "0", "1", "0", "64" };
+  const char *under_min[] = { "2", "0", "-1", "0", "-1", "63" };
+  ElanpressMatchParams def, p;
+
+  elanpress_match_params_default (&def);
+
+  set_int_settings (huge);
+  elanpress_match_params_from_env (&p);
+  g_assert_cmpint (p.norm_win, ==, G_MAXINT);
+  g_assert_cmpint (p.candidates, ==, ELANPRESS_MAX_CANDIDATES);
+  g_assert_cmpint (p.score_mode, ==, 2);
+  g_assert_cmpint (p.sidelobe_r, ==, G_MAXINT);
+  g_assert_cmpint (p.rot_prefilter, ==, G_MAXINT);
+  g_assert_cmpint (p.max_side, ==, G_MAXINT);
+
+  set_int_settings (at_min);
+  elanpress_match_params_from_env (&p);
+  g_assert_cmpint (p.norm_win, ==, 3);
+  g_assert_cmpint (p.candidates, ==, 1);
+  g_assert_cmpint (p.score_mode, ==, 0);
+  g_assert_cmpint (p.sidelobe_r, ==, 1);
+  g_assert_cmpint (p.rot_prefilter, ==, 0);
+  g_assert_cmpint (p.max_side, ==, 64);
+
+  /* SCORE_MODE has no minimum; it clamps to 0 */
+  set_int_settings (under_min);
+  elanpress_match_params_from_env (&p);
+  g_assert_cmpint (p.norm_win, ==, def.norm_win);
+  g_assert_cmpint (p.candidates, ==, def.candidates);
+  g_assert_cmpint (p.score_mode, ==, 0);
+  g_assert_cmpint (p.sidelobe_r, ==, def.sidelobe_r);
+  g_assert_cmpint (p.rot_prefilter, ==, def.rot_prefilter);
+  g_assert_cmpint (p.max_side, ==, def.max_side);
+
+  g_setenv ("FP_ELANPRESS_NORM_WIN", "8", TRUE);
+  elanpress_match_params_from_env (&p);
+  g_assert_cmpint (p.norm_win, ==, 9);
+
+  /* SCORE_MODE has no minimum, so a huge negative value reaches the cast.
+   * Its default is 0, so the checks for 0 can't tell a clamp from an
+   * ignored value; they only catch the cast under a float-cast-overflow
+   * sanitizer, which -fsanitize=undefined leaves out in GCC */
+  g_setenv ("FP_ELANPRESS_SCORE_MODE", "1", TRUE);
+  elanpress_match_params_from_env (&p);
+  g_assert_cmpint (p.score_mode, ==, 1);
+  g_setenv ("FP_ELANPRESS_SCORE_MODE", "-1e30", TRUE);
+  elanpress_match_params_from_env (&p);
+  g_assert_cmpint (p.score_mode, ==, 0);
+
+  /* the candidate cap on its own, with values that fit an int */
+  g_setenv ("FP_ELANPRESS_CANDIDATES", "2e9", TRUE);
+  elanpress_match_params_from_env (&p);
+  g_assert_cmpint (p.candidates, ==, ELANPRESS_MAX_CANDIDATES);
+  g_setenv ("FP_ELANPRESS_CANDIDATES", "64", TRUE);
+  elanpress_match_params_from_env (&p);
+  g_assert_cmpint (p.candidates, ==, 64);
+
+  for (guint i = 0; i < G_N_ELEMENTS (int_settings); i++)
+    g_unsetenv (int_settings[i]);
+}
+
 int
 main (int argc, char *argv[])
 {
@@ -184,6 +262,8 @@ main (int argc, char *argv[])
 
   g_test_add_func ("/elanpress/env/double", test_env_double);
   g_test_add_func ("/elanpress/env/params-not-finite", test_env_params_not_finite);
+  g_test_add_func ("/elanpress/env/int-settings-fit",
+                   test_env_int_settings_fit);
 
   return g_test_run ();
 }

@@ -76,6 +76,10 @@ typedef struct
   int    overlap;      /* pixels that took part in the score */
 } ElanpressMatchResult;
 
+/* each candidate is refined at full resolution and the array is sized by
+ * the count, so FP_ELANPRESS_CANDIDATES stops here; the default is 4 */
+#define ELANPRESS_MAX_CANDIDATES 64
+
 typedef struct _ElanpressProbe ElanpressProbe;
 
 void      elanpress_match_params_default (ElanpressMatchParams *p);
