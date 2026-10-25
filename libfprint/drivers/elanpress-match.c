@@ -84,73 +84,143 @@ elanpress_match_params_default (ElanpressMatchParams *p)
   p->max_side = 256;
 }
 
-gboolean
-elanpress_env_double (const char *name, double *out)
+/* d as the parser reads it, with a '.' whatever the locale */
+static const char *
+env_format (char buf[G_ASCII_DTOSTR_BUF_SIZE], double d)
+{
+  return g_ascii_formatd (buf, G_ASCII_DTOSTR_BUF_SIZE, "%g", d);
+}
+
+double
+elanpress_env_double (const char *name, double def)
 {
   const char *v = g_getenv (name);
+  char buf[G_ASCII_DTOSTR_BUF_SIZE];
   char *end;
   double d;
 
   if (!v || !*v)
-    return FALSE;
+    return def;
   d = g_ascii_strtod (v, &end);
   /* g_ascii_strtod () accepts "nan" and "inf", and overflows to inf */
-  if (end == v || !isfinite (d))
-    return FALSE;
-  *out = d;
-  return TRUE;
+  if (end == v || *end || !isfinite (d))
+    {
+      g_message ("Ignoring %s=\"%s\", expected a number, using %s",
+                 name, v, env_format (buf, def));
+      return def;
+    }
+  return d;
+}
+
+/* d, read from name, clamped to [lo, hi]; logged if it was outside */
+static double
+env_clamp (const char *name, double d, double lo, double hi)
+{
+  char buf[G_ASCII_DTOSTR_BUF_SIZE];
+
+  if (d < lo || d > hi)
+    {
+      d = CLAMP (d, lo, hi);
+      g_message ("%s=\"%s\" is out of range, using %s",
+                 name, g_getenv (name), env_format (buf, d));
+    }
+  return d;
+}
+
+/* d, read from name, clamped to [lo, hi] while still a double, since a
+ * double past G_MAXINT does not fit an int, then cut to an integer and,
+ * if odd is set, made odd; logged if any of these changed it */
+static int
+env_clamp_int (const char *name, double d, int lo, int hi, gboolean odd)
+{
+  double c = CLAMP (d, lo, hi);
+  int n = (int) c;
+
+  if (odd)
+    n |= 1;
+  if (n != d)
+    g_message ("%s=\"%s\" is %s, using %d", name, g_getenv (name),
+               c != d ? "out of range" :
+               n != c && (int) c == c ? "not odd" : "not a whole number", n);
+  return n;
 }
 
 /* an integer setting; values under min are ignored, as before, and the rest
- * are clamped to max while still a double, since a double past G_MAXINT
- * does not fit an int */
-static gboolean
-env_int (const char *name, int min, int max, int *out)
+ * are clamped to max */
+static int
+env_int (const char *name, int min, int max, gboolean odd, int def)
 {
-  double d;
+  double d = elanpress_env_double (name, def);
 
-  if (!elanpress_env_double (name, &d) || d < min)
-    return FALSE;
-  *out = (int) MIN (d, max);
-  return TRUE;
+  if (d < min)
+    {
+      g_message ("Ignoring %s=\"%s\", expected at least %d, using %d",
+                 name, g_getenv (name), min, def);
+      return def;
+    }
+  return env_clamp_int (name, d, min, max, odd);
 }
 
 void
 elanpress_match_params_from_env (ElanpressMatchParams *p)
 {
+  char buf[G_ASCII_DTOSTR_BUF_SIZE];
   double d;
-  int i;
 
   elanpress_match_params_default (p);
-  if (elanpress_env_double ("FP_ELANPRESS_THRESHOLD", &d))
-    p->threshold = d;
   /* range / step sets how many rotated copies of the probe are made */
-  if (elanpress_env_double ("FP_ELANPRESS_ROT_RANGE", &d))
-    p->rot_range = CLAMP (d, 0, ELANPRESS_MAX_ROT_RANGE);
-  if (elanpress_env_double ("FP_ELANPRESS_ROT_STEP", &d) && d > 0)
-    p->rot_step = MAX (d, ELANPRESS_MIN_ROT_STEP);
+  d = elanpress_env_double ("FP_ELANPRESS_ROT_RANGE", p->rot_range);
+  p->rot_range = env_clamp ("FP_ELANPRESS_ROT_RANGE", d,
+                            0, ELANPRESS_MAX_ROT_RANGE);
+  d = elanpress_env_double ("FP_ELANPRESS_ROT_STEP", p->rot_step);
+  if (d > 0)
+    p->rot_step = env_clamp ("FP_ELANPRESS_ROT_STEP", d,
+                             ELANPRESS_MIN_ROT_STEP, G_MAXDOUBLE);
+  else
+    g_message ("Ignoring FP_ELANPRESS_ROT_STEP=\"%s\", expected a number above 0, using %s",
+               g_getenv ("FP_ELANPRESS_ROT_STEP"), env_format (buf, p->rot_step));
   /* a fraction of the frame, multiplied by its area and cast to int. At 2
    * the threshold is already twice the frame, which no overlap reaches */
-  if (elanpress_env_double ("FP_ELANPRESS_MIN_OVERLAP", &d))
-    p->min_overlap = CLAMP (d, 0.0, 2.0);
-  if (env_int ("FP_ELANPRESS_NORM_WIN", 3, G_MAXINT, &i))
-    p->norm_win = i | 1;
-  if (env_int ("FP_ELANPRESS_CANDIDATES", 1, ELANPRESS_MAX_CANDIDATES, &i))
-    p->candidates = i;
-  if (elanpress_env_double ("FP_ELANPRESS_SCORE_MODE", &d))
-    p->score_mode = (int) CLAMP (d, 0, 2);
-  if (env_int ("FP_ELANPRESS_SIDELOBE_R", 1, G_MAXINT, &i))
-    p->sidelobe_r = i;
-  if (elanpress_env_double ("FP_ELANPRESS_BLOCK_WEIGHT", &d))
-    p->block_weight = CLAMP (d, 0.0, 1.0);
-  if (env_int ("FP_ELANPRESS_ROT_PREFILTER", 0, G_MAXINT, &i))
-    p->rot_prefilter = i;
-  if (env_int ("FP_ELANPRESS_COARSE_PEAKS", 0, 64, &i))
-    p->coarse_peaks = i;
-  if (elanpress_env_double ("FP_ELANPRESS_REG_THRESH", &d))
-    p->reg_thresh = d;
-  if (env_int ("FP_ELANPRESS_MAX_SIDE", 64, G_MAXINT, &i))
-    p->max_side = i;
+  d = elanpress_env_double ("FP_ELANPRESS_MIN_OVERLAP", p->min_overlap);
+  p->min_overlap = env_clamp ("FP_ELANPRESS_MIN_OVERLAP", d, 0, 2);
+  p->norm_win = env_int ("FP_ELANPRESS_NORM_WIN", 3, G_MAXINT, TRUE, p->norm_win);
+  p->candidates = env_int ("FP_ELANPRESS_CANDIDATES", 1, ELANPRESS_MAX_CANDIDATES, FALSE,
+                           p->candidates);
+  d = elanpress_env_double ("FP_ELANPRESS_SCORE_MODE", p->score_mode);
+  p->score_mode = env_clamp_int ("FP_ELANPRESS_SCORE_MODE", d, 0, 2, FALSE);
+  p->sidelobe_r = env_int ("FP_ELANPRESS_SIDELOBE_R", 1, G_MAXINT, FALSE, p->sidelobe_r);
+  d = elanpress_env_double ("FP_ELANPRESS_BLOCK_WEIGHT", p->block_weight);
+  p->block_weight = env_clamp ("FP_ELANPRESS_BLOCK_WEIGHT", d, 0, 1);
+  p->rot_prefilter = env_int ("FP_ELANPRESS_ROT_PREFILTER", 0, G_MAXINT, FALSE,
+                              p->rot_prefilter);
+  p->coarse_peaks = env_int ("FP_ELANPRESS_COARSE_PEAKS", 0, 64, FALSE,
+                             p->coarse_peaks);
+  p->reg_thresh = elanpress_env_double ("FP_ELANPRESS_REG_THRESH", p->reg_thresh);
+  p->max_side = env_int ("FP_ELANPRESS_MAX_SIDE", 64, G_MAXINT, FALSE, p->max_side);
+}
+
+void
+elanpress_device_config_from_env (ElanpressDeviceConfig *cfg)
+{
+  double d;
+
+  cfg->threshold = elanpress_env_double ("FP_ELANPRESS_THRESHOLD", cfg->threshold);
+  d = elanpress_env_double ("FP_ELANPRESS_ENROLL_STAGES", cfg->enroll_stages);
+  cfg->enroll_stages = env_clamp_int ("FP_ELANPRESS_ENROLL_STAGES", d,
+                                      1, ELANPRESS_MAX_ENROLL_STAGES, FALSE);
+  d = elanpress_env_double ("FP_ELANPRESS_IMAGES_PER_TOUCH", cfg->images_per_touch);
+  cfg->images_per_touch = env_clamp_int ("FP_ELANPRESS_IMAGES_PER_TOUCH", d,
+                                         1, ELANPRESS_MAX_FRAMES, FALSE);
+  d = elanpress_env_double ("FP_ELANPRESS_DUP_SIMILARITY", cfg->dup_similarity);
+  cfg->dup_similarity = env_clamp ("FP_ELANPRESS_DUP_SIMILARITY", d, 0, 1);
+}
+
+void
+elanpress_gates_from_env (ElanpressGates *g)
+{
+  g->min_mean = elanpress_env_double ("FP_ELANPRESS_MIN_MEAN", ELANPRESS_MIN_MEAN);
+  g->min_contrast = elanpress_env_double ("FP_ELANPRESS_MIN_CONTRAST", ELANPRESS_MIN_CONTRAST);
+  g->min_coverage = elanpress_env_double ("FP_ELANPRESS_MIN_COVERAGE", ELANPRESS_MIN_COVERAGE);
 }
 
 /* ------------------------------------------------------- raw frames */

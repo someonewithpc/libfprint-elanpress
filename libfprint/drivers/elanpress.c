@@ -1018,14 +1018,6 @@ open_complete (FpiSsm *ssm, FpDevice *dev, GError *error)
   fpi_device_open_complete (dev, error);
 }
 
-static double
-env_double_default (const char *name, double def)
-{
-  double d;
-
-  return elanpress_env_double (name, &d) ? d : def;
-}
-
 /* The device's defaults from elanpress_devices[], or their env overrides.
  * Probe applies them too, so the number of enroll stages is right before
  * the device is first opened. */
@@ -1034,23 +1026,18 @@ elanpress_load_config (FpiDeviceElanPress *self)
 {
   FpDevice *dev = FP_DEVICE (self);
   guint64 idx = fpi_device_get_driver_data (dev);
-  const ElanpressDeviceConfig *cfg;
-  double d;
+  ElanpressDeviceConfig cfg;
 
   g_assert (idx < G_N_ELEMENTS (elanpress_devices));
-  cfg = &elanpress_devices[idx];
+  cfg = elanpress_devices[idx];
+  elanpress_device_config_from_env (&cfg);
 
-  /* elanpress_match_params_from_env () reads FP_ELANPRESS_THRESHOLD too,
-   * but falls back to the global default rather than the device's */
-  self->params.threshold = env_double_default ("FP_ELANPRESS_THRESHOLD",
-                                               cfg->threshold);
-  /* clamp before converting: out-of-range doubles do not fit an int */
-  d = env_double_default ("FP_ELANPRESS_ENROLL_STAGES", cfg->enroll_stages);
-  self->enroll_stages = (int) CLAMP (d, 1, ELANPRESS_MAX_ENROLL_STAGES);
-  d = env_double_default ("FP_ELANPRESS_IMAGES_PER_TOUCH", cfg->images_per_touch);
-  self->images_per_touch = (int) CLAMP (d, 1, ELANPRESS_MAX_FRAMES);
-  d = env_double_default ("FP_ELANPRESS_DUP_SIMILARITY", cfg->dup_similarity);
-  self->dup_similarity = CLAMP (d, 0.0, 1.0);
+  /* the threshold is the device's, so elanpress_match_params_from_env ()
+   * leaves it alone */
+  self->params.threshold = cfg.threshold;
+  self->enroll_stages = cfg.enroll_stages;
+  self->images_per_touch = cfg.images_per_touch;
+  self->dup_similarity = cfg.dup_similarity;
   fpi_device_set_nr_enroll_stages (dev, self->enroll_stages);
 }
 
@@ -1066,6 +1053,7 @@ elanpress_open (FpDevice *dev)
 {
   FpiDeviceElanPress *self = FPI_DEVICE_ELANPRESS (dev);
   GError *error = NULL;
+  ElanpressGates gates;
   const char *dump;
 
   if (!g_usb_device_claim_interface (fpi_device_get_usb_device (dev),
@@ -1075,11 +1063,14 @@ elanpress_open (FpDevice *dev)
       return;
     }
 
+  /* in this order: elanpress_match_params_from_env () resets the threshold
+   * to the global default, and elanpress_load_config () sets the device's */
   elanpress_match_params_from_env (&self->params);
   elanpress_load_config (self);
-  self->min_mean = env_double_default ("FP_ELANPRESS_MIN_MEAN", ELANPRESS_MIN_MEAN);
-  self->min_contrast = env_double_default ("FP_ELANPRESS_MIN_CONTRAST", ELANPRESS_MIN_CONTRAST);
-  self->min_coverage = env_double_default ("FP_ELANPRESS_MIN_COVERAGE", ELANPRESS_MIN_COVERAGE);
+  elanpress_gates_from_env (&gates);
+  self->min_mean = gates.min_mean;
+  self->min_contrast = gates.min_contrast;
+  self->min_coverage = gates.min_coverage;
 
   dump = g_getenv ("FP_ELANPRESS_DUMP_DIR");
   if (dump && g_file_test (dump, G_FILE_TEST_IS_DIR))
