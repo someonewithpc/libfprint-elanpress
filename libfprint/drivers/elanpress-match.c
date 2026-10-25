@@ -84,7 +84,7 @@ elanpress_match_params_from_env (ElanpressMatchParams *p)
     p->rot_range = d;
   if (env_double ("FP_ELANPRESS_ROT_STEP", &d) && d > 0)
     p->rot_step = d;
-  if (env_double ("FP_ELANPRESS_MIN_OVERLAP", &d))
+  if (env_double ("FP_ELANPRESS_MIN_OVERLAP", &d) && d > 0 && d <= 1)
     p->min_overlap = d;
   if (env_double ("FP_ELANPRESS_NORM_WIN", &d) && d >= 3)
     p->norm_win = ((int) d) | 1;
