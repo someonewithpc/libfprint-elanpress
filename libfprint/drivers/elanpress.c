@@ -41,6 +41,7 @@ struct _FpiDeviceElanPress
   guint16              fw_ver;
   int                  frame_width;
   int                  frame_height;
+  gboolean             reread_short;
 
   ElanpressMatchParams params;
   double               min_mean;
@@ -460,17 +461,73 @@ elanpress_send_cmd (FpiSsm *ssm, FpDevice *dev, const guint8 *cmd)
 }
 
 static void
-elanpress_read (FpiSsm *ssm, FpDevice *dev, guint8 ep, gsize len,
-                guint timeout, FpiUsbTransferCallback callback)
+elanpress_submit_read (FpiSsm *ssm, FpDevice *dev, guint8 ep, gsize len,
+                       guint timeout, FpiUsbTransferCallback callback,
+                       gpointer user_data)
 {
   FpiUsbTransfer *transfer = fpi_usb_transfer_new (dev);
 
   transfer->ssm = ssm;
-  transfer->short_is_error = TRUE;
   fpi_usb_transfer_fill_bulk (transfer, ep, len);
   fpi_usb_transfer_submit (transfer, timeout,
                            fpi_device_get_cancellable (dev),
-                           callback, NULL);
+                           callback, user_data);
+}
+
+/* short_is_error only catches a reply that is short but not empty. An
+ * empty one would leave the zeroed buffer to be read as data: as an
+ * all-zero frame, a calibration mean of 0 or firmware 0x0000. So the
+ * length is checked here instead.
+ *
+ * A pre-scan that the stop command cancelled may still answer on the
+ * command endpoint, with its one status byte or with nothing. So a short
+ * reply there is read past once before it counts as an error, and so is
+ * no reply after it */
+static void
+elanpress_read_cb (FpiUsbTransfer *transfer, FpDevice *dev,
+                   gpointer user_data, GError *error)
+{
+  FpiDeviceElanPress *self = FPI_DEVICE_ELANPRESS (dev);
+  FpiUsbTransferCallback callback = user_data;
+
+  if (!error && transfer->actual_length < transfer->length)
+    {
+      if (transfer->endpoint == ELANPRESS_EP_CMD_IN && !self->reread_short)
+        {
+          fp_dbg ("%zd of %zd bytes on endpoint 0x%02x, reading again",
+                  transfer->actual_length, transfer->length,
+                  transfer->endpoint);
+          self->reread_short = TRUE;
+          elanpress_submit_read (transfer->ssm, dev, transfer->endpoint,
+                                 transfer->length, ELANPRESS_CMD_TIMEOUT,
+                                 elanpress_read_cb, user_data);
+          return;
+        }
+      error = fpi_device_error_new_msg (FP_DEVICE_ERROR_PROTO,
+                                        "Short reply on endpoint 0x%02x: %zd of %zd bytes",
+                                        transfer->endpoint,
+                                        transfer->actual_length,
+                                        transfer->length);
+    }
+  else if (self->reread_short &&
+           g_error_matches (error, G_USB_DEVICE_ERROR,
+                            G_USB_DEVICE_ERROR_TIMED_OUT))
+    {
+      g_clear_error (&error);
+      error = fpi_device_error_new_msg (FP_DEVICE_ERROR_PROTO,
+                                        "Short reply on endpoint 0x%02x, then none",
+                                        transfer->endpoint);
+    }
+  self->reread_short = FALSE;
+  callback (transfer, dev, NULL, error);
+}
+
+static void
+elanpress_read (FpiSsm *ssm, FpDevice *dev, guint8 ep, gsize len,
+                guint timeout, FpiUsbTransferCallback callback)
+{
+  elanpress_submit_read (ssm, dev, ep, len, timeout,
+                         elanpress_read_cb, (gpointer) callback);
 }
 
 /* === touch capture state machine === */
@@ -673,10 +730,12 @@ capture_run_state (FpiSsm *ssm, FpDevice *dev)
       break;
 
     case CAPTURE_WAIT_ON_READ:
-      elanpress_read (ssm, dev, ELANPRESS_EP_CMD_IN, 1,
-                      self->num_frames > 0 ? ELANPRESS_FINGER_GONE_TIMEOUT :
-                      ELANPRESS_WAIT_FINGER_TIMEOUT,
-                      elanpress_status_cb);
+      /* the pre-scan may answer with nothing, which reads as no finger */
+      elanpress_submit_read (ssm, dev, ELANPRESS_EP_CMD_IN, 1,
+                             self->num_frames > 0 ?
+                             ELANPRESS_FINGER_GONE_TIMEOUT :
+                             ELANPRESS_WAIT_FINGER_TIMEOUT,
+                             elanpress_status_cb, NULL);
       break;
 
     case CAPTURE_FRAME_DECIDE:
