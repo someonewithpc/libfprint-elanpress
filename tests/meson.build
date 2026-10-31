@@ -39,6 +39,7 @@ drivers_tests = {
     'elan-cobo': {},
     'elanmoc': {},
     'elanpress': { 'timeout': 90 },
+    'elanpress-short-reply': { 'timeout': 30 },
     'elanspi': { 'timeout': 30 },
     'synaptics': {},
     'upektc_img': {},
@@ -276,6 +277,14 @@ if get_option('introspection')
             )
         endif
     endforeach
+
+    if 'elanpress' in supported_drivers
+        test('elanpress-recordings',
+            python3,
+            args: [files('elanpress-recordings.py'), '--check'],
+            suite: ['drivers', 'no-valgrind'],
+        )
+    endif
 
     if  installed_tests and driver_tests_enabled
         install_data(umockdev_test.full_path(),
