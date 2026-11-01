@@ -742,6 +742,33 @@ test_coarse_peaks_off_for_sidelobe (void)
     match_noise_both_ways (seeds[i], NULL, 1);
 }
 
+/* with FP_ELANPRESS_MIN_OVERLAP next to 0, the corners where two noise
+ * images barely touch would score 1.0 */
+static void
+test_min_overlap_floor (void)
+{
+  const int w = 80, h = 56;
+  GRand *r = g_rand_new_with_seed (7);
+
+  for (int c = 0; c < 4; c++)
+    {
+      g_autofree guint8 *probe = random_image (r, w, h);
+      g_autofree guint8 *tmpl = random_image (r, w, h);
+      ElanpressMatchParams p;
+      ElanpressMatchResult res;
+      ElanpressProbe *pr;
+
+      elanpress_match_params_default (&p);
+      p.min_overlap = 1e-9;
+      pr = elanpress_probe_new (probe, w, h, &p);
+      elanpress_probe_match (pr, tmpl, &res);
+      elanpress_probe_free (pr);
+      g_assert_cmpint (res.overlap, >=, MIN_OVERLAP_PIXELS);
+      g_assert_cmpfloat (res.peak, <, 0.9);
+    }
+  g_rand_free (r);
+}
+
 int
 main (int argc, char *argv[])
 {
@@ -771,6 +798,7 @@ main (int argc, char *argv[])
 #endif
   g_test_add_func ("/elanpress/match/coarse-peaks-masked", test_coarse_peaks_off_for_mask);
   g_test_add_func ("/elanpress/match/coarse-peaks-sidelobe", test_coarse_peaks_off_for_sidelobe);
+  g_test_add_func ("/elanpress/match/min-overlap-floor", test_min_overlap_floor);
 
   return g_test_run ();
 }

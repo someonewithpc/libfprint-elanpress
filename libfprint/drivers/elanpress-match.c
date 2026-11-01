@@ -55,6 +55,13 @@
 #endif
 #endif
 
+/* Two pixels of different values correlate at exactly +1 or -1, so with a
+ * tiny FP_ELANPRESS_MIN_OVERLAP a placement that barely touches the template
+ * could win. Whatever the setting, a placement has to overlap by this many
+ * pixels at full resolution, as layer_ncc_rect() asks of its blocks, and by
+ * the same area at half and quarter resolution */
+#define MIN_OVERLAP_PIXELS 64
+
 /* ------------------------------------------------------------ params */
 
 void
@@ -937,8 +944,8 @@ elanpress_probe_match_canvas (const ElanpressProbe *pr, const guint8 *px,
   /* offsets range over every placement with any overlap */
   mw = pw + hw - 1;
   mh = ph + hh - 1;
-  min_n_half = (int) (pr->p.min_overlap * pw * ph);
-  min_n_full = (int) (pr->p.min_overlap * pr->w * pr->h);
+  min_n_half = MAX ((int) (pr->p.min_overlap * pw * ph), MIN_OVERLAP_PIXELS / 4);
+  min_n_full = MAX ((int) (pr->p.min_overlap * pr->w * pr->h), MIN_OVERLAP_PIXELS);
   if (pr->p.score_mode != 0)
     {
       maps = g_new (float, (size_t) pr->n_rot * mw * mh);
@@ -984,7 +991,8 @@ elanpress_probe_match_canvas (const ElanpressProbe *pr, const guint8 *px,
         layer_build_tables (&tquarter);
       qw = tquarter.w;
       qh = tquarter.h;
-      min_n_quarter = (int) (pr->p.min_overlap * pr->quarter[0].w * pr->quarter[0].h);
+      min_n_quarter = MAX ((int) (pr->p.min_overlap * pr->quarter[0].w * pr->quarter[0].h),
+                           MIN_OVERLAP_PIXELS / 16);
       /* The masked corners of a rotated probe grow at each halving, so an
        * offset just above min_overlap at half resolution can fall below it
        * at quarter resolution. Peaks get a 10% margin. */
