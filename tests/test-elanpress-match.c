@@ -287,6 +287,8 @@ test_env_logged (void)
                  "Ignoring FP_ELANPRESS_MAX_SIDE=\"10\", expected at least 64, using 256");
   expect_logged (read_params, "FP_ELANPRESS_NORM_WIN", "1e12",
                  "FP_ELANPRESS_NORM_WIN=\"1e12\" is out of range, using 2147483647");
+  expect_logged (read_params, "FP_ELANPRESS_COARSE_PEAKS", "-1",
+                 "Ignoring FP_ELANPRESS_COARSE_PEAKS=\"-1\", expected at least 0, using 4");
   expect_logged (read_params, "FP_ELANPRESS_NORM_WIN", "9.5",
                  "FP_ELANPRESS_NORM_WIN=\"9.5\" is not a whole number, using 9");
   expect_logged (read_params, "FP_ELANPRESS_CANDIDATES", "2.9",
@@ -295,6 +297,8 @@ test_env_logged (void)
                  "FP_ELANPRESS_SCORE_MODE=\"1.7\" is not a whole number, using 1");
   expect_logged (read_params, "FP_ELANPRESS_CANDIDATES", "100",
                  "FP_ELANPRESS_CANDIDATES=\"100\" is out of range, using 64");
+  expect_logged (read_params, "FP_ELANPRESS_COARSE_PEAKS", "100",
+                 "FP_ELANPRESS_COARSE_PEAKS=\"100\" is out of range, using 64");
   expect_logged (read_params, "FP_ELANPRESS_ROT_STEP", "0",
                  "Ignoring FP_ELANPRESS_ROT_STEP=\"0\", expected a number above 0, using 4");
   expect_logged (read_params, "FP_ELANPRESS_ROT_STEP", "0.1",

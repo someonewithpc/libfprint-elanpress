@@ -17,6 +17,13 @@
  * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA
  */
 
+static int fallbacks;
+#define ELANPRESS_COUNT_FALLBACK() (fallbacks++)
+static int force_peaks;
+#define ELANPRESS_PEAKS_OFF(maps, mask) (!force_peaks && ((maps) || (mask)))
+static int peak_radius = 3;
+#define ELANPRESS_PEAK_RADIUS peak_radius
+
 /* The sums are static, so the matcher is built into this test */
 #include "elanpress-match.c"
 
@@ -54,6 +61,45 @@ random_image (GRand *r, int w, int h)
     img[i] = g_rand_int_range (r, 0, 256);
   return img;
 }
+
+#if defined(__x86_64__) && defined(__GLIBC__) && !defined(__FMA__)
+/* smoothed noise: texture at about ridge scale that, unlike a periodic
+ * pattern, lines up with itself at one shift only */
+static guint8 *
+texture_image (GRand *r, int w, int h)
+{
+  g_autofree double *a = g_new (double, (size_t) w * h);
+  g_autofree double *b = g_new (double, (size_t) w * h);
+  guint8 *img = g_new (guint8, (size_t) w * h);
+  double lo = G_MAXDOUBLE, hi = -G_MAXDOUBLE;
+
+  for (int i = 0; i < w * h; i++)
+    a[i] = g_rand_double (r);
+  for (int pass = 0; pass < 2; pass++)
+    {
+      for (int y = 0; y < h; y++)
+        for (int x = 0; x < w; x++)
+          {
+            double sum = 0;
+            int n = 0;
+
+            for (int v = MAX (0, y - 1); v <= MIN (h - 1, y + 1); v++)
+              for (int u = MAX (0, x - 1); u <= MIN (w - 1, x + 1); u++, n++)
+                sum += a[v * w + u];
+            b[y * w + x] = sum / n;
+          }
+      memcpy (a, b, sizeof (double) * w * h);
+    }
+  for (int i = 0; i < w * h; i++)
+    {
+      lo = MIN (lo, a[i]);
+      hi = MAX (hi, a[i]);
+    }
+  for (int i = 0; i < w * h; i++)
+    img[i] = (guint8) lrint (255 * (a[i] - lo) / (hi - lo));
+  return img;
+}
+#endif
 
 static void
 assert_sums_equal (const gint64 s[5], int n, const gint64 ref[5], int ref_n)
@@ -503,11 +549,295 @@ test_simd_env_unused (void)
 }
 #endif
 
+/* this test, like the window radius one, uses data built on x86-64 with
+ * glibc's libm and no FMA, where other rounding can move the shift */
 #if defined(__x86_64__) && defined(__GLIBC__) && !defined(__FMA__)
-/* Whole matches with the default settings, against what the matcher found
- * before the sums were rewritten: two pairs cut from one noise image with
- * noise added to the template, and two unrelated ones. Other rounding, as
- * from FMA, could change the last bits, so this only runs on x86-64 */
+/* The windowed half-resolution search finds the same alignment as the
+ * full search for a crop of a larger print */
+static void
+test_coarse_peaks_find_the_shift (void)
+{
+  GRand *r = g_rand_new_with_seed (4);
+  const int W = 100, H = 70, w = 80, h = 56;
+
+  for (int c = 0; c < 40; c++)
+    {
+      g_autofree guint8 *big = texture_image (r, W, H);
+      g_autofree guint8 *probe = g_new (guint8, w * h);
+      g_autofree guint8 *tmpl = g_new (guint8, w * h);
+      int sx = g_rand_int_range (r, 0, 20), sy = g_rand_int_range (r, 0, 14);
+      ElanpressMatchResult res[2];
+
+      for (int y = 0; y < h; y++)
+        for (int x = 0; x < w; x++)
+          {
+            probe[y * w + x] = big[(y + sy) * W + x + sx];
+            tmpl[y * w + x] = big[y * W + x];
+          }
+      for (int peaks = 0; peaks < 2; peaks++)
+        {
+          ElanpressMatchParams p;
+          ElanpressProbe *pr;
+
+          elanpress_match_params_default (&p);
+          p.rot_prefilter = 3;
+          p.coarse_peaks = peaks ? 4 : 0;
+          pr = elanpress_probe_new (probe, w, h, &p);
+          fallbacks = 0;
+          elanpress_probe_match (pr, tmpl, &res[peaks]);
+          elanpress_probe_free (pr);
+          /* equal results alone would also come from falling back to the
+           * full search every time */
+          g_assert_cmpint (fallbacks, ==, 0);
+        }
+      g_assert_cmpfloat (res[0].peak, >, 0.99);
+      g_assert_cmpint (res[0].dx, ==, -sx);
+      g_assert_cmpint (res[0].dy, ==, -sy);
+      g_assert_cmpfloat (fabs (res[0].rot), <, 1e-9);
+      g_assert_cmpint (res[1].dx, ==, res[0].dx);
+      g_assert_cmpint (res[1].dy, ==, res[0].dy);
+      g_assert_cmpfloat (res[1].rot, ==, res[0].rot);
+      g_assert_cmpfloat (res[1].score, ==, res[0].score);
+    }
+  g_rand_free (r);
+}
+#endif
+
+static const Cand *
+find_peak (const Cand *c, int k, int dx, int dy)
+{
+  for (int i = 0; i < k; i++)
+    if (c[i].rot >= 0 && c[i].dx == dx && c[i].dy == dy)
+      return &c[i];
+  return NULL;
+}
+
+static int
+count_peaks (const Cand *c, int k)
+{
+  int n = 0;
+
+  for (int i = 0; i < k; i++)
+    n += c[i].rot >= 0;
+  return n;
+}
+
+static void
+test_peak_insert (void)
+{
+  Cand c[3];
+
+  for (int i = 0; i < 3; i++)
+    c[i] = (Cand){ -3.0, -1, 0, 0 };
+
+  peak_insert (c, 3, 0.5, 0, 0, 0);
+  /* within 2 pixels: a worse peak is dropped, a better one replaces it */
+  peak_insert (c, 3, 0.4, 0, 1, 1);
+  g_assert_cmpint (count_peaks (c, 3), ==, 1);
+  g_assert_nonnull (find_peak (c, 3, 0, 0));
+  peak_insert (c, 3, 0.6, 0, 2, -2);
+  g_assert_cmpint (count_peaks (c, 3), ==, 1);
+  g_assert_nonnull (find_peak (c, 3, 2, -2));
+  g_assert_cmpfloat (find_peak (c, 3, 2, -2)->score, ==, 0.6);
+
+  /* 3 pixels apart is far enough to keep both */
+  peak_insert (c, 3, 0.3, 0, 5, -2);
+  peak_insert (c, 3, 0.2, 0, 20, 20);
+  g_assert_cmpint (count_peaks (c, 3), ==, 3);
+
+  /* when full, a far peak replaces the worst only if it beats it */
+  peak_insert (c, 3, 0.1, 0, 40, 40);
+  g_assert_null (find_peak (c, 3, 40, 40));
+  peak_insert (c, 3, 0.25, 0, 40, 40);
+  g_assert_null (find_peak (c, 3, 20, 20));
+  g_assert_nonnull (find_peak (c, 3, 40, 40));
+
+  /* a peak within 2 pixels of two others that beats both takes one slot
+   * and frees the other */
+  peak_insert (c, 3, 0.9, 0, 3, -2);
+  g_assert_cmpint (count_peaks (c, 3), ==, 2);
+  g_assert_nonnull (find_peak (c, 3, 3, -2));
+  g_assert_cmpfloat (find_peak (c, 3, 3, -2)->score, ==, 0.9);
+  g_assert_nonnull (find_peak (c, 3, 40, 40));
+
+  /* within 2 pixels of a better one: dropped even with a free slot */
+  peak_insert (c, 3, 0.8, 0, 4, -1);
+  g_assert_cmpint (count_peaks (c, 3), ==, 2);
+}
+
+/* Random pairs whose one quarter-resolution peak sits at an overlap that
+ * is too small at half resolution everywhere in its window, so the
+ * windowed search finds nothing and has to search the whole rotation.
+ * Such pairs are rare, so the test runs through seeds until it has seen
+ * three, rather than naming seeds that depend on how the build rounds */
+static void
+test_coarse_peaks_fall_back (void)
+{
+  int found = 0;
+  guint32 seed;
+
+  for (seed = 1; seed <= 4000 && found < 3; seed++)
+    {
+      GRand *r = g_rand_new_with_seed (seed);
+      int w = g_rand_int_range (r, 24, 64), h = g_rand_int_range (r, 24, 64);
+      int tw = g_rand_int_range (r, 24, 64), th = g_rand_int_range (r, 24, 64);
+      double min_overlap = g_rand_double_range (r, 0.3, 0.7);
+      g_autofree guint8 *probe = random_image (r, w, h);
+      g_autofree guint8 *tmpl = random_image (r, tw, th);
+      ElanpressMatchResult res[2];
+      int fell_back = 0;
+
+      for (int peaks = 1; peaks >= 0; peaks--)
+        {
+          ElanpressMatchParams p;
+          ElanpressProbe *pr;
+
+          elanpress_match_params_default (&p);
+          p.min_overlap = min_overlap;
+          p.rot_prefilter = 1;
+          p.coarse_peaks = peaks;
+          pr = elanpress_probe_new (probe, w, h, &p);
+          fallbacks = 0;
+          elanpress_probe_match_canvas (pr, tmpl, NULL, tw, th, &res[peaks]);
+          elanpress_probe_free (pr);
+          if (peaks)
+            fell_back = fallbacks;
+          if (!fell_back)
+            break;
+        }
+      g_rand_free (r);
+      if (!fell_back)
+        continue;
+      g_assert_cmpint (fell_back, ==, 1);
+      /* only one rotation reaches half resolution, so after the fallback
+       * both searches looked at the same offsets. Some pairs have none
+       * that overlap enough; they must agree too, but don't count */
+      if (res[0].peak > -2.0)
+        found++;
+      g_assert_cmpint (res[1].dx, ==, res[0].dx);
+      g_assert_cmpint (res[1].dy, ==, res[0].dy);
+      g_assert_cmpfloat (res[1].rot, ==, res[0].rot);
+      g_assert_cmpfloat (res[1].score, ==, res[0].score);
+    }
+  /* the pairs depend on the platform's rounding, so say how far the scan
+   * went for a failure where it was never run */
+  g_test_message ("%d pairs fell back in the first %u seeds", found, seed - 1);
+  g_assert_cmpint (found, ==, 3);
+}
+
+/* Two unrelated random images, matched with or without the
+ * quarter-resolution peaks. Their best alignment is weak and can lie
+ * anywhere, so it often sits off the centre of a window */
+static ElanpressMatchResult
+match_noise (guint32 seed, const guint8 *mask, int score_mode, int peaks)
+{
+  const int w = 80, h = 56;
+  GRand *r = g_rand_new_with_seed (seed);
+  g_autofree guint8 *probe = random_image (r, w, h);
+  g_autofree guint8 *tmpl = random_image (r, w, h);
+  ElanpressMatchParams p;
+  ElanpressMatchResult res;
+  ElanpressProbe *pr;
+
+  elanpress_match_params_default (&p);
+  p.score_mode = score_mode;
+  p.coarse_peaks = peaks;
+  pr = elanpress_probe_new (probe, w, h, &p);
+  fallbacks = 0;
+  elanpress_probe_match_canvas (pr, tmpl, mask, w, h, &res);
+  elanpress_probe_free (pr);
+  g_rand_free (r);
+  return res;
+}
+
+#if defined(__x86_64__) && defined(__GLIBC__) && !defined(__FMA__)
+static gboolean
+same_result (const ElanpressMatchResult *a, const ElanpressMatchResult *b)
+{
+  return a->dx == b->dx && a->dy == b->dy && a->rot == b->rot &&
+         a->sidelobe == b->sidelobe && a->score == b->score;
+}
+#endif
+
+/* the windowed search gives the full search's result without falling
+ * back, and with the matcher changed by the test hooks it would not */
+static void
+match_noise_both_ways (guint32 seed, const guint8 *mask, int score_mode,
+                       gboolean witness_peaks, int witness_radius)
+{
+  ElanpressMatchResult full, windowed;
+
+#if defined(__x86_64__) && defined(__GLIBC__) && !defined(__FMA__)
+  ElanpressMatchResult witness;
+#endif
+
+  full = match_noise (seed, mask, score_mode, 0);
+  windowed = match_noise (seed, mask, score_mode, 4);
+  g_assert_cmpint (fallbacks, ==, 0);
+  g_assert_cmpfloat (full.peak, >, -2.0);
+  g_assert_cmpint (windowed.dx, ==, full.dx);
+  g_assert_cmpint (windowed.dy, ==, full.dy);
+  g_assert_cmpfloat (windowed.rot, ==, full.rot);
+  g_assert_cmpfloat (windowed.sidelobe, ==, full.sidelobe);
+  g_assert_cmpfloat (windowed.score, ==, full.score);
+
+#if defined(__x86_64__) && defined(__GLIBC__) && !defined(__FMA__)
+  /* the pairs were picked on x86-64, as for the window radius test */
+  force_peaks = witness_peaks;
+  peak_radius = witness_radius;
+  witness = match_noise (seed, mask, score_mode, 4);
+  force_peaks = FALSE;
+  peak_radius = 3;
+  g_assert_false (same_result (&witness, &full));
+#endif
+}
+
+/* This test uses pairs of random images picked on x86-64 with glibc's libm
+ * and no FMA, where other rounding can change which offsets they hit */
+#if defined(__x86_64__) && defined(__GLIBC__) && !defined(__FMA__)
+/* pairs whose windowed search finds the full search's offset with the
+ * window radius of 3 and misses it with 2 */
+static void
+test_coarse_peaks_window_radius (void)
+{
+  const guint32 seeds[] = { 3, 11, 12 };
+
+  for (guint i = 0; i < G_N_ELEMENTS (seeds); i++)
+    match_noise_both_ways (seeds[i], NULL, 0, FALSE, 2);
+}
+#endif
+
+/* A masked canvas and the sidelobe score modes keep the full search. For
+ * these pairs the peaks would change the result, as the test shows by
+ * turning them on */
+static void
+test_coarse_peaks_off_for_mask (void)
+{
+  const guint32 seeds[] = { 0, 2, 3 };
+  guint8 mask[80 * 56];
+
+  for (int y = 0; y < 56; y++)
+    for (int x = 0; x < 80; x++)
+      mask[y * 80 + x] = (x / 8 + y / 8) % 3 ? 255 : 0;
+  for (guint i = 0; i < G_N_ELEMENTS (seeds); i++)
+    match_noise_both_ways (seeds[i], mask, 0, TRUE, 3);
+}
+
+static void
+test_coarse_peaks_off_for_sidelobe (void)
+{
+  const guint32 seeds[] = { 0, 2, 3 };
+
+  for (guint i = 0; i < G_N_ELEMENTS (seeds); i++)
+    match_noise_both_ways (seeds[i], NULL, 1, TRUE, 3);
+}
+
+#if defined(__x86_64__) && defined(__GLIBC__) && !defined(__FMA__)
+/* Whole matches with the default settings and the full half-resolution
+ * search, against what the matcher found before the sums were rewritten:
+ * two pairs cut from one noise image with noise added to the template, and
+ * two unrelated ones. Other rounding, as from FMA, could change the last
+ * bits, so this only runs on x86-64 */
 static void
 test_match_unchanged (void)
 {
@@ -540,6 +870,8 @@ test_match_unchanged (void)
                               other[y * w + x];
           }
       elanpress_match_params_default (&p);
+      /* the windowed search can settle elsewhere, by design */
+      p.coarse_peaks = 0;
       pr = elanpress_probe_new (probe, w, h, &p);
       elanpress_probe_match (pr, tmpl, &res);
       elanpress_probe_free (pr);
@@ -556,6 +888,47 @@ test_match_unchanged (void)
   g_rand_free (r);
 }
 #endif
+
+/* Without the rotation prefilter, or when it keeps every rotation, there are
+ * no quarter-resolution peaks, so the setting changes nothing */
+static void
+test_coarse_peaks_need_prefilter (void)
+{
+  const int w = 80, h = 56;
+  GRand *r = g_rand_new_with_seed (5);
+  g_autofree guint8 *probe = random_image (r, w, h);
+  g_autofree guint8 *tmpl = random_image (r, w, h);
+
+  for (int keep = 0; keep < 2; keep++)
+    {
+      ElanpressMatchResult res[2];
+
+      for (int peaks = 0; peaks < 2; peaks++)
+        {
+          ElanpressMatchParams p;
+          ElanpressProbe *pr;
+
+          elanpress_match_params_default (&p);
+          p.coarse_peaks = peaks ? 4 : 0;
+          pr = elanpress_probe_new (probe, w, h, &p);
+          p.rot_prefilter = keep ? elanpress_probe_n_rotations (pr) : 0;
+          elanpress_probe_free (pr);
+          pr = elanpress_probe_new (probe, w, h, &p);
+          fallbacks = 0;
+          elanpress_probe_match_canvas (pr, tmpl, NULL, w, h, &res[peaks]);
+          elanpress_probe_free (pr);
+          g_assert_cmpint (fallbacks, ==, 0);
+        }
+      g_assert_cmpfloat (res[1].score, ==, res[0].score);
+      g_assert_cmpfloat (res[1].peak, ==, res[0].peak);
+      g_assert_cmpfloat (res[1].block_min, ==, res[0].block_min);
+      g_assert_cmpint (res[1].dx, ==, res[0].dx);
+      g_assert_cmpint (res[1].dy, ==, res[0].dy);
+      g_assert_cmpfloat (res[1].rot, ==, res[0].rot);
+      g_assert_cmpint (res[1].overlap, ==, res[0].overlap);
+    }
+  g_rand_free (r);
+}
 
 int
 main (int argc, char *argv[])
@@ -583,6 +956,15 @@ main (int argc, char *argv[])
 #else
   g_test_add_func ("/elanpress/sums/simd-env-unused", test_simd_env_unused);
 #endif
+  g_test_add_func ("/elanpress/match/peak-insert", test_peak_insert);
+  g_test_add_func ("/elanpress/match/coarse-peaks-fall-back", test_coarse_peaks_fall_back);
+  g_test_add_func ("/elanpress/match/coarse-peaks-need-prefilter", test_coarse_peaks_need_prefilter);
+#if defined(__x86_64__) && defined(__GLIBC__) && !defined(__FMA__)
+  g_test_add_func ("/elanpress/match/coarse-peaks", test_coarse_peaks_find_the_shift);
+  g_test_add_func ("/elanpress/match/coarse-peaks-window", test_coarse_peaks_window_radius);
+#endif
+  g_test_add_func ("/elanpress/match/coarse-peaks-masked", test_coarse_peaks_off_for_mask);
+  g_test_add_func ("/elanpress/match/coarse-peaks-sidelobe", test_coarse_peaks_off_for_sidelobe);
 
   return g_test_run ();
 }

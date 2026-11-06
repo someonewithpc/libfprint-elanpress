@@ -40,6 +40,19 @@
 #define M_PI 3.14159265358979323846
 #endif
 
+/* the unit test counts the windowed searches that fall back, and can turn
+ * the peaks on where the matcher leaves them off and change the window
+ * radius, to show that its pairs depend on both */
+#ifndef ELANPRESS_COUNT_FALLBACK
+#define ELANPRESS_COUNT_FALLBACK()
+#endif
+#ifndef ELANPRESS_PEAKS_OFF
+#define ELANPRESS_PEAKS_OFF(maps, mask) ((maps) || (mask))
+#endif
+#ifndef ELANPRESS_PEAK_RADIUS
+#define ELANPRESS_PEAK_RADIUS 3
+#endif
+
 /* the unit test also builds the matcher without intrinsics, so the
  * portable loops run on x86 too */
 #if defined(__SSE2__) && !defined(ELANPRESS_NO_INTRINSICS)
@@ -67,6 +80,7 @@ elanpress_match_params_default (ElanpressMatchParams *p)
   p->sidelobe_r = 4;
   p->block_weight = 0.0;
   p->rot_prefilter = 3;
+  p->coarse_peaks = 4;
   p->reg_thresh = 0.75;
   p->max_side = 256;
 }
@@ -234,6 +248,8 @@ elanpress_match_params_from_env (ElanpressMatchParams *p)
   p->block_weight = env_clamp ("FP_ELANPRESS_BLOCK_WEIGHT", d, 0, 1);
   p->rot_prefilter = env_int ("FP_ELANPRESS_ROT_PREFILTER", 0, G_MAXINT, FALSE,
                               p->rot_prefilter);
+  p->coarse_peaks = env_int ("FP_ELANPRESS_COARSE_PEAKS", 0, 64, FALSE,
+                             p->coarse_peaks);
   d = elanpress_env_double ("FP_ELANPRESS_REG_THRESH", p->reg_thresh);
   p->reg_thresh = env_ignore_unless ("FP_ELANPRESS_REG_THRESH", d, d > 0 && d <= 1,
                                      "in (0, 1]", p->reg_thresh);
@@ -1101,6 +1117,38 @@ cand_insert (Cand *c, int k, double score, int rot, int dx, int dy)
     }
 }
 
+/* Keeps up to k quarter-resolution peaks of one rotation more than 2
+ * pixels apart, so one broad peak can't take every window: a better offset
+ * replaces every slot within 2 pixels, a worse one is dropped. What is kept
+ * depends on scan order, since a dropped peak doesn't come back when the
+ * one that beat it is replaced. */
+static void
+peak_insert (Cand *c, int k, double score, int rot, int dx, int dy)
+{
+  int slot = -1;
+
+  for (int i = 0; i < k; i++)
+    if (c[i].rot >= 0 && abs (c[i].dx - dx) <= 2 && abs (c[i].dy - dy) <= 2 &&
+        c[i].score >= score)
+      return;
+  for (int i = 0; i < k; i++)
+    if (c[i].rot >= 0 && abs (c[i].dx - dx) <= 2 && abs (c[i].dy - dy) <= 2)
+      {
+        c[i] = (Cand){ -3.0, -1, 0, 0 };
+        slot = i;
+      }
+  if (slot < 0)
+    {
+      slot = 0;
+      for (int i = 1; i < k; i++)
+        if (c[i].score < c[slot].score)
+          slot = i;
+      if (c[slot].score >= score)
+        return;
+    }
+  c[slot] = (Cand){ score, rot, dx, dy };
+}
+
 double
 elanpress_probe_match_canvas (const ElanpressProbe *pr, const guint8 *px,
                               const guint8 *mask, int tw, int th,
@@ -1114,6 +1162,7 @@ elanpress_probe_match_canvas (const ElanpressProbe *pr, const guint8 *px,
   float *maps = NULL;
   ElanpressMatchResult best = { -2.0, -2.0, -2.0, -1.0, -1.0, 0, 0, 0.0, 0 };
   int best_rot_idx = -1;
+  guint8 *visit = NULL;
 
   layer_from_image (&tfull, px, mask, tw, th);
   layer_half (&thalf, &tfull);
@@ -1147,6 +1196,11 @@ elanpress_probe_match_canvas (const ElanpressProbe *pr, const guint8 *px,
    * best few for the real search. Ranking is all that is needed here. */
   gboolean *use_rot = g_new (gboolean, pr->n_rot);
   int keep = pr->p.rot_prefilter;
+  /* The sidelobe modes need the half-resolution map at every offset. A
+   * masked canvas loses too many valid pixels at quarter scale for its
+   * peaks to point at the right half-resolution offsets. */
+  int n_peaks = ELANPRESS_PEAKS_OFF (maps, mask) ? 0 : pr->p.coarse_peaks;
+  Cand *peaks = NULL;
 
   for (int r = 0; r < pr->n_rot; r++)
     use_rot[r] = TRUE;
@@ -1154,7 +1208,14 @@ elanpress_probe_match_canvas (const ElanpressProbe *pr, const guint8 *px,
     {
       Layer tquarter;
       double *qbest = g_new (double, pr->n_rot);
-      int qw, qh, min_n_quarter;
+      int qw, qh, min_n_quarter, min_n_peak;
+
+      if (n_peaks > 0)
+        {
+          peaks = g_new (Cand, (size_t) pr->n_rot * n_peaks);
+          for (int i = 0; i < pr->n_rot * n_peaks; i++)
+            peaks[i] = (Cand){ -3.0, -1, 0, 0 };
+        }
 
       layer_half (&tquarter, &thalf);
       if (tquarter.full)
@@ -1162,6 +1223,10 @@ elanpress_probe_match_canvas (const ElanpressProbe *pr, const guint8 *px,
       qw = tquarter.w;
       qh = tquarter.h;
       min_n_quarter = (int) (pr->p.min_overlap * pr->quarter[0].w * pr->quarter[0].h);
+      /* The masked corners of a rotated probe grow at each halving, so an
+       * offset just above min_overlap at half resolution can fall below it
+       * at quarter resolution. Peaks get a 10% margin. */
+      min_n_peak = peaks ? min_n_quarter * 9 / 10 : min_n_quarter;
       for (int r = 0; r < pr->n_rot; r++)
         {
           const Layer *p_q = &pr->quarter[r];
@@ -1170,9 +1235,13 @@ elanpress_probe_match_canvas (const ElanpressProbe *pr, const guint8 *px,
           for (int dy = -(qh - 1); dy <= p_q->h - 1; dy++)
             for (int dx = -(qw - 1); dx <= p_q->w - 1; dx++)
               {
-                double s = layer_ncc (p_q, &tquarter, dx, dy, min_n_quarter, NULL);
-                if (s > qbest[r])
+                int n = 0;
+                double s = layer_ncc (p_q, &tquarter, dx, dy, min_n_peak, &n);
+
+                if (n >= min_n_quarter && s > qbest[r])
                   qbest[r] = s;
+                if (peaks && s > -2.0)
+                  peak_insert (peaks + r * n_peaks, n_peaks, s, r, dx, dy);
               }
           use_rot[r] = FALSE;
         }
@@ -1190,26 +1259,70 @@ elanpress_probe_match_canvas (const ElanpressProbe *pr, const guint8 *px,
       layer_clear (&tquarter);
     }
 
-  /* coarse: selected rotations, every translation, at half resolution.
-   * probe(x, y) pairs with canvas(x - dx, y - dy). */
+  /* coarse: selected rotations at half resolution, every translation or,
+   * with quarter-resolution peaks, only the offsets around them. A real
+   * match has a strong peak that survives the quarter scale; this mostly
+   * skips chance alignments. probe(x, y) pairs with canvas(x - dx, y - dy). */
+  if (peaks)
+    visit = g_new (guint8, (size_t) mw * mh);
+
   for (int r = 0; r < pr->n_rot; r++)
     {
       const Layer *p_h = &pr->half[r];
+      gboolean windowed = FALSE;
 
       if (!use_rot[r])
         continue;
 
-      for (int dy = -(hh - 1); dy <= ph - 1; dy++)
-        for (int dx = -(hw - 1); dx <= pw - 1; dx++)
-          {
-            double s = layer_ncc (p_h, &thalf, dx, dy, min_n_half, NULL);
-            if (s > -2.0)
+      if (visit)
+        {
+          /* a quarter offset q is a half offset within 2q +/- 1; two more
+           * pixels of margin for the peak moving between scales */
+          const int R = ELANPRESS_PEAK_RADIUS;
+
+          memset (visit, 0, (size_t) mw * mh);
+          for (int i = 0; i < n_peaks; i++)
+            {
+              const Cand *c = &peaks[r * n_peaks + i];
+
+              if (c->rot < 0)
+                continue;
+              windowed = TRUE;
+              for (int dy = MAX (2 * c->dy - R, -(hh - 1)); dy <= MIN (2 * c->dy + R, ph - 1); dy++)
+                for (int dx = MAX (2 * c->dx - R, -(hw - 1)); dx <= MIN (2 * c->dx + R, pw - 1); dx++)
+                  visit[(dy + hh - 1) * mw + (dx + hw - 1)] = 1;
+            }
+        }
+
+      for (;;)
+        {
+          gboolean found = FALSE;
+
+          for (int dy = -(hh - 1); dy <= ph - 1; dy++)
+            for (int dx = -(hw - 1); dx <= pw - 1; dx++)
               {
-                if (maps)
-                  maps[((size_t) r * mh + (dy + hh - 1)) * mw + (dx + hw - 1)] = (float) s;
-                cand_insert (cands, k, s, r, dx, dy);
+                double s;
+
+                if (windowed && !visit[(dy + hh - 1) * mw + (dx + hw - 1)])
+                  continue;
+                s = layer_ncc (p_h, &thalf, dx, dy, min_n_half, NULL);
+                if (s > -2.0)
+                  {
+                    found = TRUE;
+                    if (maps)
+                      maps[((size_t) r * mh + (dy + hh - 1)) * mw + (dx + hw - 1)] = (float) s;
+                    cand_insert (cands, k, s, r, dx, dy);
+                  }
               }
-          }
+          /* Peaks at a marginal quarter overlap can leave every offset in
+           * the windows short of min_n_half or flat (zero variance), and a
+           * rotation can have no quarter peak at all; search the whole
+           * rotation then. */
+          if (found || !windowed)
+            break;
+          ELANPRESS_COUNT_FALLBACK ();
+          windowed = FALSE;
+        }
     }
 
   /* fine: refine each candidate at full resolution */
@@ -1283,6 +1396,8 @@ elanpress_probe_match_canvas (const ElanpressProbe *pr, const guint8 *px,
                  pr->p.block_weight * best.block_min;
 
   g_free (use_rot);
+  g_free (peaks);
+  g_free (visit);
   g_free (maps);
   g_free (cands);
   layer_clear (&tfull);
