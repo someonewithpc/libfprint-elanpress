@@ -137,6 +137,22 @@ env_clamp_int (const char *name, double d, int lo, int hi, gboolean odd)
   return n;
 }
 
+/* d, read from name, if ok, or else def, logged with what was expected */
+static double
+env_ignore_unless (const char *name, double d, gboolean ok,
+                   const char *expected, double def)
+{
+  char buf[G_ASCII_DTOSTR_BUF_SIZE];
+  g_autofree char *esc = NULL;
+
+  if (ok)
+    return d;
+  esc = env_escaped (name);
+  g_message ("Ignoring %s=\"%s\", expected a number %s, using %s",
+             name, esc, expected, env_format (buf, def));
+  return def;
+}
+
 /* an integer setting; values under min are ignored, as before, and the rest
  * are clamped to max */
 static int
@@ -203,7 +219,9 @@ elanpress_match_params_from_env (ElanpressMatchParams *p)
   p->block_weight = env_clamp ("FP_ELANPRESS_BLOCK_WEIGHT", d, 0, 1);
   p->rot_prefilter = env_int ("FP_ELANPRESS_ROT_PREFILTER", 0, G_MAXINT, FALSE,
                               p->rot_prefilter);
-  p->reg_thresh = elanpress_env_double ("FP_ELANPRESS_REG_THRESH", p->reg_thresh);
+  d = elanpress_env_double ("FP_ELANPRESS_REG_THRESH", p->reg_thresh);
+  p->reg_thresh = env_ignore_unless ("FP_ELANPRESS_REG_THRESH", d, d > 0 && d <= 1,
+                                     "in (0, 1]", p->reg_thresh);
   p->max_side = env_int ("FP_ELANPRESS_MAX_SIDE", 64, G_MAXINT, FALSE, p->max_side);
 }
 
@@ -212,7 +230,11 @@ elanpress_device_config_from_env (ElanpressDeviceConfig *cfg)
 {
   double d;
 
-  cfg->threshold = elanpress_env_double ("FP_ELANPRESS_THRESHOLD", cfg->threshold);
+  /* at 0 or below nearly any finger would match. No upper bound: the
+   * sidelobe score modes go past 1 */
+  d = elanpress_env_double ("FP_ELANPRESS_THRESHOLD", cfg->threshold);
+  cfg->threshold = env_ignore_unless ("FP_ELANPRESS_THRESHOLD", d, d > 0,
+                                      "above 0", cfg->threshold);
   d = elanpress_env_double ("FP_ELANPRESS_ENROLL_STAGES", cfg->enroll_stages);
   cfg->enroll_stages = env_clamp_int ("FP_ELANPRESS_ENROLL_STAGES", d,
                                       1, ELANPRESS_MAX_ENROLL_STAGES, FALSE);
@@ -226,9 +248,17 @@ elanpress_device_config_from_env (ElanpressDeviceConfig *cfg)
 void
 elanpress_gates_from_env (ElanpressGates *g)
 {
-  g->min_mean = elanpress_env_double ("FP_ELANPRESS_MIN_MEAN", ELANPRESS_MIN_MEAN);
-  g->min_contrast = elanpress_env_double ("FP_ELANPRESS_MIN_CONTRAST", ELANPRESS_MIN_CONTRAST);
-  g->min_coverage = elanpress_env_double ("FP_ELANPRESS_MIN_COVERAGE", ELANPRESS_MIN_COVERAGE);
+  double d;
+
+  d = elanpress_env_double ("FP_ELANPRESS_MIN_MEAN", ELANPRESS_MIN_MEAN);
+  g->min_mean = env_ignore_unless ("FP_ELANPRESS_MIN_MEAN", d, d >= 0,
+                                   "of at least 0", ELANPRESS_MIN_MEAN);
+  d = elanpress_env_double ("FP_ELANPRESS_MIN_CONTRAST", ELANPRESS_MIN_CONTRAST);
+  g->min_contrast = env_ignore_unless ("FP_ELANPRESS_MIN_CONTRAST", d, d >= 0,
+                                       "of at least 0", ELANPRESS_MIN_CONTRAST);
+  d = elanpress_env_double ("FP_ELANPRESS_MIN_COVERAGE", ELANPRESS_MIN_COVERAGE);
+  g->min_coverage = env_ignore_unless ("FP_ELANPRESS_MIN_COVERAGE", d, d >= 0 && d <= 1,
+                                       "in [0, 1]", ELANPRESS_MIN_COVERAGE);
 }
 
 /* ------------------------------------------------------- raw frames */

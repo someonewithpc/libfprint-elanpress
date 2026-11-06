@@ -263,6 +263,10 @@ test_env_logged (void)
                  "Ignoring FP_ELANPRESS_ROT_STEP=\"-1\\n\", expected a number above 0, using 4");
   expect_logged (read_params, "FP_ELANPRESS_REG_THRESH", "nan",
                  "Ignoring FP_ELANPRESS_REG_THRESH=\"nan\", expected a number, using 0.75");
+  expect_logged (read_params, "FP_ELANPRESS_REG_THRESH", "0",
+                 "Ignoring FP_ELANPRESS_REG_THRESH=\"0\", expected a number in (0, 1], using 0.75");
+  expect_logged (read_params, "FP_ELANPRESS_REG_THRESH", "1.5",
+                 "Ignoring FP_ELANPRESS_REG_THRESH=\"1.5\", expected a number in (0, 1], using 0.75");
   /* the threshold is the device's, read with the device config */
   expect_logged (read_params, "FP_ELANPRESS_THRESHOLD", "x", NULL);
   expect_logged (read_params, "FP_ELANPRESS_NORM_WIN", "2",
@@ -308,6 +312,10 @@ test_env_logged (void)
 
   expect_logged (read_config, "FP_ELANPRESS_THRESHOLD", "x",
                  "Ignoring FP_ELANPRESS_THRESHOLD=\"x\", expected a number, using 0.76");
+  expect_logged (read_config, "FP_ELANPRESS_THRESHOLD", "-1",
+                 "Ignoring FP_ELANPRESS_THRESHOLD=\"-1\", expected a number above 0, using 0.76");
+  expect_logged (read_config, "FP_ELANPRESS_THRESHOLD", "0",
+                 "Ignoring FP_ELANPRESS_THRESHOLD=\"0\", expected a number above 0, using 0.76");
   expect_logged (read_config, "FP_ELANPRESS_ENROLL_STAGES", "100",
                  "FP_ELANPRESS_ENROLL_STAGES=\"100\" is out of range, using 40");
   expect_logged (read_config, "FP_ELANPRESS_ENROLL_STAGES", "12.9",
@@ -323,12 +331,27 @@ test_env_logged (void)
 
   expect_logged (read_gates, "FP_ELANPRESS_MIN_MEAN", "inf",
                  "Ignoring FP_ELANPRESS_MIN_MEAN=\"inf\", expected a number, using 150");
+  expect_logged (read_gates, "FP_ELANPRESS_MIN_MEAN", "-1",
+                 "Ignoring FP_ELANPRESS_MIN_MEAN=\"-1\", expected a number of at least 0, using 150");
+  expect_logged (read_gates, "FP_ELANPRESS_MIN_CONTRAST", "-0.5",
+                 "Ignoring FP_ELANPRESS_MIN_CONTRAST=\"-0.5\", expected a number of at least 0, using 40");
+  expect_logged (read_gates, "FP_ELANPRESS_MIN_COVERAGE", "1.5",
+                 "Ignoring FP_ELANPRESS_MIN_COVERAGE=\"1.5\", expected a number in [0, 1], using 0.35");
+  expect_logged (read_gates, "FP_ELANPRESS_MIN_COVERAGE", "-0.1",
+                 "Ignoring FP_ELANPRESS_MIN_COVERAGE=\"-0.1\", expected a number in [0, 1], using 0.35");
   expect_logged (read_gates, "FP_ELANPRESS_MIN_CONTRAST", "4o",
                  "Ignoring FP_ELANPRESS_MIN_CONTRAST=\"4o\", expected a number, using 40");
   expect_logged (read_gates, "FP_ELANPRESS_MIN_COVERAGE", "",
                  NULL);
 
   /* values in range and unset or empty variables log nothing */
+  expect_logged (read_params, "FP_ELANPRESS_REG_THRESH", "1", NULL);
+  expect_logged (read_config, "FP_ELANPRESS_THRESHOLD", "1", NULL);
+  expect_logged (read_config, "FP_ELANPRESS_THRESHOLD", "2.5", NULL);
+  expect_logged (read_gates, "FP_ELANPRESS_MIN_MEAN", "0", NULL);
+  expect_logged (read_gates, "FP_ELANPRESS_MIN_CONTRAST", "0", NULL);
+  expect_logged (read_gates, "FP_ELANPRESS_MIN_COVERAGE", "0", NULL);
+  expect_logged (read_gates, "FP_ELANPRESS_MIN_COVERAGE", "1", NULL);
   g_setenv ("FP_ELANPRESS_CANDIDATES", "", TRUE);
   expect_logged (read_params, "FP_ELANPRESS_MIN_OVERLAP", "0.3", NULL);
   expect_logged (read_config, "FP_ELANPRESS_ENROLL_STAGES", "40", NULL);
@@ -391,6 +414,82 @@ test_env_config_and_gates (void)
   g_unsetenv ("FP_ELANPRESS_MIN_MEAN");
   g_unsetenv ("FP_ELANPRESS_MIN_CONTRAST");
   g_unsetenv ("FP_ELANPRESS_MIN_COVERAGE");
+}
+
+/* an out-of-range value leaves the default, the ends kept are used */
+static void
+test_env_out_of_range_kept (void)
+{
+  ElanpressDeviceConfig cfg;
+  ElanpressMatchParams p, def;
+  ElanpressGates g;
+
+  const struct
+  {
+    const char *name, *value;
+    gboolean    ignored;
+    double      want;
+  } cases[] = {
+    { "FP_ELANPRESS_MIN_MEAN", "-1", TRUE, ELANPRESS_MIN_MEAN },
+    { "FP_ELANPRESS_MIN_MEAN", "0", FALSE, 0 },
+    { "FP_ELANPRESS_MIN_CONTRAST", "-0.5", TRUE, ELANPRESS_MIN_CONTRAST },
+    { "FP_ELANPRESS_MIN_CONTRAST", "0", FALSE, 0 },
+    { "FP_ELANPRESS_MIN_COVERAGE", "1.5", TRUE, ELANPRESS_MIN_COVERAGE },
+    { "FP_ELANPRESS_MIN_COVERAGE", "-0.1", TRUE, ELANPRESS_MIN_COVERAGE },
+    { "FP_ELANPRESS_MIN_COVERAGE", "0", FALSE, 0 },
+    { "FP_ELANPRESS_MIN_COVERAGE", "1", FALSE, 1 },
+  };
+
+  elanpress_match_params_default (&def);
+  for (guint i = 0; i < 4; i++)
+    {
+      const char *values[] = { "-1", "0", "1", "2.5" };
+      const double want[] = { 0.76, 0.76, 1, 2.5 };
+
+      cfg = (ElanpressDeviceConfig){ 0.76, 20, 3, 0.85 };
+      g_setenv ("FP_ELANPRESS_THRESHOLD", values[i], TRUE);
+      g_test_expect_message (G_LOG_DOMAIN, G_LOG_LEVEL_MESSAGE, i < 2 ? "*THRESHOLD*" : "sentinel");
+      if (i < 2)
+        g_test_expect_message (G_LOG_DOMAIN, G_LOG_LEVEL_MESSAGE, "sentinel");
+      elanpress_device_config_from_env (&cfg);
+      g_message ("sentinel");
+      g_test_assert_expected_messages ();
+      g_assert_cmpfloat (cfg.threshold, ==, want[i]);
+    }
+  g_unsetenv ("FP_ELANPRESS_THRESHOLD");
+
+  for (guint i = 0; i < 4; i++)
+    {
+      const char *values[] = { "0", "1.5", "1", "1e-6" };
+      const double want[] = { def.reg_thresh, def.reg_thresh, 1, 1e-6 };
+
+      g_setenv ("FP_ELANPRESS_REG_THRESH", values[i], TRUE);
+      g_test_expect_message (G_LOG_DOMAIN, G_LOG_LEVEL_MESSAGE, i < 2 ? "*REG_THRESH*" : "sentinel");
+      if (i < 2)
+        g_test_expect_message (G_LOG_DOMAIN, G_LOG_LEVEL_MESSAGE, "sentinel");
+      elanpress_match_params_from_env (&p);
+      g_message ("sentinel");
+      g_test_assert_expected_messages ();
+      g_assert_cmpfloat (p.reg_thresh, ==, want[i]);
+    }
+  g_unsetenv ("FP_ELANPRESS_REG_THRESH");
+
+  for (guint i = 0; i < G_N_ELEMENTS (cases); i++)
+    {
+      gboolean ignored = cases[i].ignored;
+
+      g_setenv (cases[i].name, cases[i].value, TRUE);
+      g_test_expect_message (G_LOG_DOMAIN, G_LOG_LEVEL_MESSAGE, ignored ? "Ignoring *" : "sentinel");
+      if (ignored)
+        g_test_expect_message (G_LOG_DOMAIN, G_LOG_LEVEL_MESSAGE, "sentinel");
+      elanpress_gates_from_env (&g);
+      g_message ("sentinel");
+      g_test_assert_expected_messages ();
+      g_unsetenv (cases[i].name);
+      g_assert_cmpfloat (g.min_mean, ==, g_str_equal (cases[i].name, "FP_ELANPRESS_MIN_MEAN") ? cases[i].want : ELANPRESS_MIN_MEAN);
+      g_assert_cmpfloat (g.min_contrast, ==, g_str_equal (cases[i].name, "FP_ELANPRESS_MIN_CONTRAST") ? cases[i].want : ELANPRESS_MIN_CONTRAST);
+      g_assert_cmpfloat (g.min_coverage, ==, g_str_equal (cases[i].name, "FP_ELANPRESS_MIN_COVERAGE") ? cases[i].want : ELANPRESS_MIN_COVERAGE);
+    }
 }
 
 static const char *int_settings[] = {
@@ -630,6 +729,7 @@ main (int argc, char *argv[])
   g_test_add_func ("/elanpress/env/logged", test_env_logged);
   g_test_add_func ("/elanpress/env/logged-locale", test_env_logged_locale);
   g_test_add_func ("/elanpress/env/config-and-gates", test_env_config_and_gates);
+  g_test_add_func ("/elanpress/env/out-of-range-kept", test_env_out_of_range_kept);
   g_test_add_func ("/elanpress/env/int-settings-fit",
                    test_env_int_settings_fit);
   g_test_add_func ("/elanpress/env/rotation-bounded",
