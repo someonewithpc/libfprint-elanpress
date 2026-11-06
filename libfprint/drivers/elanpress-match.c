@@ -63,6 +63,16 @@
 #endif
 #endif
 
+/* Two pixels of different values correlate at exactly +1 or -1, so with a
+ * tiny FP_ELANPRESS_MIN_OVERLAP a placement that barely touches the template
+ * could win. Whatever the setting, a placement has to overlap by this many
+ * pixels at full resolution, as layer_ncc_rect() asks of its blocks, and by
+ * the same area at half resolution. Quarter-resolution peaks need as many
+ * pixels as half resolution, since the same area there is only 4 pixels,
+ * and corners that small would take peak slots. A frame of fewer pixels
+ * matches nothing, which the driver avoids by taking 32x32 and up */
+#define MIN_OVERLAP_PIXELS 64
+
 /* ------------------------------------------------------------ params */
 
 void
@@ -1149,6 +1159,29 @@ peak_insert (Cand *c, int k, double score, int rot, int dx, int dy)
   c[slot] = (Cand){ score, rot, dx, dy };
 }
 
+/* The overlap, in pixels of each layer, that a placement needs at each
+ * resolution: min_overlap's share of the probe, and at least the floor */
+typedef struct
+{
+  int full, half, quarter;
+  int peak;  /* for quarter-resolution peaks */
+} MinOverlap;
+
+static void
+min_overlap_pixels (const ElanpressProbe *pr, MinOverlap *m)
+{
+  double share = pr->p.min_overlap;
+
+  m->full = MAX ((int) (share * pr->w * pr->h), MIN_OVERLAP_PIXELS);
+  m->half = MAX ((int) (share * pr->half[0].w * pr->half[0].h), MIN_OVERLAP_PIXELS / 4);
+  m->quarter = MAX ((int) (share * pr->quarter[0].w * pr->quarter[0].h),
+                    MIN_OVERLAP_PIXELS / 4);
+  /* The masked corners of a rotated probe grow at each halving, so an
+   * offset just above min_overlap at half resolution can fall below it
+   * at quarter resolution. Peaks get a 10% margin. */
+  m->peak = MAX (m->quarter * 9 / 10, MIN_OVERLAP_PIXELS / 4);
+}
+
 double
 elanpress_probe_match_canvas (const ElanpressProbe *pr, const guint8 *px,
                               const guint8 *mask, int tw, int th,
@@ -1158,7 +1191,8 @@ elanpress_probe_match_canvas (const ElanpressProbe *pr, const guint8 *px,
   int k = MAX (pr->p.candidates, 1);
   Cand *cands = g_new (Cand, k);
   int pw = pr->half[0].w, ph = pr->half[0].h;
-  int hw, hh, mw, mh, min_n_half, min_n_full, best_cand = -1;
+  int hw, hh, mw, mh, best_cand = -1;
+  MinOverlap min_n;
   float *maps = NULL;
   ElanpressMatchResult best = { -2.0, -2.0, -2.0, -1.0, -1.0, 0, 0, 0.0, 0 };
   int best_rot_idx = -1;
@@ -1175,8 +1209,7 @@ elanpress_probe_match_canvas (const ElanpressProbe *pr, const guint8 *px,
   /* offsets range over every placement with any overlap */
   mw = pw + hw - 1;
   mh = ph + hh - 1;
-  min_n_half = (int) (pr->p.min_overlap * pw * ph);
-  min_n_full = (int) (pr->p.min_overlap * pr->w * pr->h);
+  min_overlap_pixels (pr, &min_n);
   if (pr->p.score_mode != 0)
     {
       maps = g_new (float, (size_t) pr->n_rot * mw * mh);
@@ -1222,11 +1255,8 @@ elanpress_probe_match_canvas (const ElanpressProbe *pr, const guint8 *px,
         layer_build_tables (&tquarter);
       qw = tquarter.w;
       qh = tquarter.h;
-      min_n_quarter = (int) (pr->p.min_overlap * pr->quarter[0].w * pr->quarter[0].h);
-      /* The masked corners of a rotated probe grow at each halving, so an
-       * offset just above min_overlap at half resolution can fall below it
-       * at quarter resolution. Peaks get a 10% margin. */
-      min_n_peak = peaks ? min_n_quarter * 9 / 10 : min_n_quarter;
+      min_n_quarter = min_n.quarter;
+      min_n_peak = peaks ? min_n.peak : min_n_quarter;
       for (int r = 0; r < pr->n_rot; r++)
         {
           const Layer *p_q = &pr->quarter[r];
@@ -1305,7 +1335,7 @@ elanpress_probe_match_canvas (const ElanpressProbe *pr, const guint8 *px,
 
                 if (windowed && !visit[(dy + hh - 1) * mw + (dx + hw - 1)])
                   continue;
-                s = layer_ncc (p_h, &thalf, dx, dy, min_n_half, NULL);
+                s = layer_ncc (p_h, &thalf, dx, dy, min_n.half, NULL);
                 if (s > -2.0)
                   {
                     found = TRUE;
@@ -1315,7 +1345,7 @@ elanpress_probe_match_canvas (const ElanpressProbe *pr, const guint8 *px,
                   }
               }
           /* Peaks at a marginal quarter overlap can leave every offset in
-           * the windows short of min_n_half or flat (zero variance), and a
+           * the windows short of min_n.half or flat (zero variance), and a
            * rotation can have no quarter peak at all; search the whole
            * rotation then. */
           if (found || !windowed)
@@ -1337,7 +1367,7 @@ elanpress_probe_match_canvas (const ElanpressProbe *pr, const guint8 *px,
         for (int dx = 2 * cands[i].dx - 2; dx <= 2 * cands[i].dx + 2; dx++)
           {
             int n = 0;
-            double s = layer_ncc (pf, &tfull, dx, dy, min_n_full, &n);
+            double s = layer_ncc (pf, &tfull, dx, dy, min_n.full, &n);
 
             if (s > best.peak)
               {

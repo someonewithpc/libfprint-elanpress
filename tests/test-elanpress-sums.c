@@ -62,7 +62,6 @@ random_image (GRand *r, int w, int h)
   return img;
 }
 
-#if defined(__x86_64__) && defined(__GLIBC__) && !defined(__FMA__)
 /* smoothed noise: texture at about ridge scale that, unlike a periodic
  * pattern, lines up with itself at one shift only */
 static guint8 *
@@ -99,7 +98,6 @@ texture_image (GRand *r, int w, int h)
     img[i] = (guint8) lrint (255 * (a[i] - lo) / (hi - lo));
   return img;
 }
-#endif
 
 static void
 assert_sums_equal (const gint64 s[5], int n, const gint64 ref[5], int ref_n)
@@ -832,6 +830,52 @@ test_coarse_peaks_off_for_sidelobe (void)
     match_noise_both_ways (seeds[i], NULL, 1, TRUE, 3);
 }
 
+/* With FP_ELANPRESS_MIN_OVERLAP next to 0, the corners where two noise
+ * images barely touch would score 1.0. Without the half-resolution floor
+ * the full search finds no placement on nearly every pair, and with a
+ * 4-pixel quarter-resolution floor the windowed search misses on some */
+static void
+test_min_overlap_floor (void)
+{
+  const int w = 80, h = 56;
+  GRand *r = g_rand_new_with_seed (7);
+  guint8 mask[80 * 56];
+
+  for (int y = 0; y < h; y++)
+    for (int x = 0; x < w; x++)
+      mask[y * w + x] = (x / 8 + y / 8) % 3 ? 255 : 0;
+  for (int c = 0; c < 40; c++)
+    {
+      g_autofree guint8 *probe = random_image (r, w, h);
+      g_autofree guint8 *tmpl = random_image (r, w, h);
+
+      /* windowed, full, on a masked canvas and with the sidelobe score */
+      for (int mode = 0; mode < 4; mode++)
+        {
+          ElanpressMatchParams p;
+          ElanpressMatchResult res;
+          ElanpressProbe *pr;
+
+          elanpress_match_params_default (&p);
+          p.min_overlap = 1e-9;
+          if (mode == 1)
+            {
+              p.coarse_peaks = 0;
+              p.rot_prefilter = 0;
+            }
+          if (mode == 3)
+            p.score_mode = 1;
+          pr = elanpress_probe_new (probe, w, h, &p);
+          elanpress_probe_match_canvas (pr, tmpl, mode == 2 ? mask : NULL,
+                                        w, h, &res);
+          elanpress_probe_free (pr);
+          g_assert_cmpint (res.overlap, >=, MIN_OVERLAP_PIXELS);
+          g_assert_cmpfloat (res.peak, <, 0.9);
+        }
+    }
+  g_rand_free (r);
+}
+
 #if defined(__x86_64__) && defined(__GLIBC__) && !defined(__FMA__)
 /* Whole matches with the default settings and the full half-resolution
  * search, against what the matcher found before the sums were rewritten:
@@ -930,6 +974,97 @@ test_coarse_peaks_need_prefilter (void)
   g_rand_free (r);
 }
 
+/* At a FP_ELANPRESS_MIN_OVERLAP of 0.2 on 32x32 frames the floors bind at
+ * quarter resolution, which changes which peaks get the slots. The
+ * windowed search must still agree with the full one, and crops of a
+ * texture must still be found where they were cut. On x86-64, with FMA
+ * as well, 39 of the 40 are; the others land a rotation step off, or
+ * elsewhere, as they do without the floors */
+static void
+test_min_overlap_floor_binding (void)
+{
+  GRand *r = g_rand_new_with_seed (8);
+  const int W = 48, H = 48, w = 32, h = 32;
+  int found = 0;
+
+  for (int c = 0; c < 40; c++)
+    {
+      g_autofree guint8 *tmpl = texture_image (r, W, H);
+      g_autofree guint8 *probe = g_new (guint8, w * h);
+      int sx = g_rand_int_range (r, 0, W - w + 1), sy = g_rand_int_range (r, 0, H - h + 1);
+      ElanpressMatchResult res[2];
+
+      for (int y = 0; y < h; y++)
+        for (int x = 0; x < w; x++)
+          probe[y * w + x] = tmpl[(y + sy) * W + x + sx];
+      for (int peaks = 0; peaks < 2; peaks++)
+        {
+          ElanpressMatchParams p;
+          ElanpressProbe *pr;
+
+          elanpress_match_params_default (&p);
+          p.min_overlap = 0.2;
+          p.coarse_peaks = peaks ? 4 : 0;
+          pr = elanpress_probe_new (probe, w, h, &p);
+          elanpress_probe_match_canvas (pr, tmpl, NULL, W, H, &res[peaks]);
+          elanpress_probe_free (pr);
+        }
+      g_assert_cmpint (res[1].dx, ==, res[0].dx);
+      g_assert_cmpint (res[1].dy, ==, res[0].dy);
+      g_assert_cmpfloat (res[1].rot, ==, res[0].rot);
+      g_assert_cmpfloat (res[1].score, ==, res[0].score);
+      if (res[0].dx == -sx && res[0].dy == -sy)
+        found++;
+    }
+  g_test_message ("%d of 40 crops found where they were cut", found);
+  g_assert_cmpint (found, >=, 36);
+  g_rand_free (r);
+}
+
+/* At the default FP_ELANPRESS_MIN_OVERLAP the floors never bind: on the
+ * smallest frame the driver accepts, 32x32, the minimum the matcher takes
+ * at every resolution is above its floor, peaks' margin included. At 0.2
+ * the quarter-resolution ones are at it */
+static void
+test_min_overlap_floor_inert (void)
+{
+  g_autofree guint8 *img = g_malloc0 (32 * 32);
+  ElanpressMatchParams p;
+  ElanpressProbe *pr;
+  MinOverlap m;
+
+  elanpress_match_params_default (&p);
+  pr = elanpress_probe_new (img, 32, 32, &p);
+  min_overlap_pixels (pr, &m);
+  elanpress_probe_free (pr);
+  g_assert_cmpint (m.full, >, MIN_OVERLAP_PIXELS);
+  g_assert_cmpint (m.half, >, MIN_OVERLAP_PIXELS / 4);
+  g_assert_cmpint (m.quarter, >, MIN_OVERLAP_PIXELS / 4);
+  g_assert_cmpint (m.peak, >, MIN_OVERLAP_PIXELS / 4);
+
+  p.min_overlap = 0.2;
+  pr = elanpress_probe_new (img, 32, 32, &p);
+  min_overlap_pixels (pr, &m);
+  elanpress_probe_free (pr);
+  g_assert_cmpint (m.full, >, MIN_OVERLAP_PIXELS);
+  g_assert_cmpint (m.half, >, MIN_OVERLAP_PIXELS / 4);
+  g_assert_cmpint (m.quarter, ==, MIN_OVERLAP_PIXELS / 4);
+  g_assert_cmpint (m.peak, ==, MIN_OVERLAP_PIXELS / 4);
+
+  /* a frame too small for the floor gets no placement, not a bad one */
+  {
+    g_autoptr(GRand) r = g_rand_new_with_seed (9);
+    g_autofree guint8 *tiny = random_image (r, 7, 7);
+    ElanpressMatchResult res;
+
+    pr = elanpress_probe_new (tiny, 7, 7, &p);
+    elanpress_probe_match (pr, tiny, &res);
+    elanpress_probe_free (pr);
+    g_assert_cmpint (res.overlap, ==, 0);
+    g_assert_cmpfloat (res.peak, ==, -2.0);
+  }
+}
+
 int
 main (int argc, char *argv[])
 {
@@ -965,6 +1100,9 @@ main (int argc, char *argv[])
 #endif
   g_test_add_func ("/elanpress/match/coarse-peaks-masked", test_coarse_peaks_off_for_mask);
   g_test_add_func ("/elanpress/match/coarse-peaks-sidelobe", test_coarse_peaks_off_for_sidelobe);
+  g_test_add_func ("/elanpress/match/min-overlap-floor", test_min_overlap_floor);
+  g_test_add_func ("/elanpress/match/min-overlap-floor-inert", test_min_overlap_floor_inert);
+  g_test_add_func ("/elanpress/match/min-overlap-floor-binding", test_min_overlap_floor_binding);
 
   return g_test_run ();
 }
