@@ -34,10 +34,28 @@ typedef struct
  * roughly 1500 on the 0c3d pad. The coverage gate rejects a finger that
  * only half landed on the small 0c3d pad; on larger pads (0c63, 80x80)
  * every full press saturates it at 1.00, which is expected, not a signal.
- * All are env-tunable, see elanpress.c */
+ * All are env-tunable, see elanpress_gates_from_env () */
 #define ELANPRESS_MIN_MEAN 150.0
 #define ELANPRESS_MIN_CONTRAST 40.0
 #define ELANPRESS_MIN_COVERAGE 0.35
+
+/* frames captured per touch, at most */
+#define ELANPRESS_MAX_FRAMES 14
+/* touches stored during enrollment, at most */
+#define ELANPRESS_MAX_ENROLL_STAGES 40
+
+/* Per-device defaults. Each set was measured on one physical pad and is
+ * provisional; FP_ELANPRESS_THRESHOLD, FP_ELANPRESS_ENROLL_STAGES,
+ * FP_ELANPRESS_IMAGES_PER_TOUCH and FP_ELANPRESS_DUP_SIMILARITY override
+ * them at runtime. driver_data indexes elanpress_devices[]. */
+typedef struct
+{
+  double threshold;        /* accept when the best score reaches this */
+  int    enroll_stages;    /* touches stored during enrollment */
+  int    images_per_touch; /* distinct images an enroll touch keeps */
+  double dup_similarity;   /* zero-shift similarity above which two frames
+                            * of a touch are duplicates */
+} ElanpressDeviceConfig;
 
 /* absolute per-frame quality gates, same units as ElanpressQuality */
 typedef struct
@@ -92,10 +110,14 @@ typedef struct _ElanpressProbe ElanpressProbe;
 void      elanpress_match_params_default (ElanpressMatchParams *p);
 void      elanpress_match_params_from_env (ElanpressMatchParams *p);
 
-/* a number from the environment; FALSE, leaving *out alone, when the
- * variable is unset, not a number or not finite */
-gboolean  elanpress_env_double (const char *name,
-                                double     *out);
+/* override a device's defaults, or the default gates, from the environment */
+void      elanpress_device_config_from_env (ElanpressDeviceConfig *cfg);
+void      elanpress_gates_from_env (ElanpressGates *g);
+
+/* a number from the environment; def when the variable is unset, empty,
+ * not a number or not finite, and the rejected value is logged */
+double    elanpress_env_double (const char *name,
+                                double      def);
 
 /* wire format -> row-major 16-bit frame */
 void      elanpress_rotate_frame (const guint8 *raw,

@@ -26,6 +26,7 @@
 
 #include "fpi-device.h"
 #include "fpi-usb-transfer.h"
+#include "elanpress-match.h"
 
 #define ELANPRESS_VEND_ID 0x04f3
 
@@ -52,7 +53,6 @@
 
 /* frames captured per touch */
 #define ELANPRESS_MIN_FRAMES 3
-#define ELANPRESS_MAX_FRAMES 14
 
 /* distinct images of a touch used as probes (verify); how many an enroll
  * touch keeps is per device, see elanpress_devices[] */
@@ -60,7 +60,6 @@
 
 /* touches stored during enrollment, unless the device sets its own */
 #define ELANPRESS_ENROLL_STAGES 20
-#define ELANPRESS_MAX_ENROLL_STAGES 40
 
 /* a background frame is rejected (finger probably still on the pad) when
  * its mean is this far from the device's own calibration mean; this is the
@@ -76,18 +75,6 @@
 G_DECLARE_FINAL_TYPE (FpiDeviceElanPress, fpi_device_elanpress, FPI,
                       DEVICE_ELANPRESS, FpDevice);
 
-/* Per-device defaults. Each set was measured on one physical pad and is
- * provisional; FP_ELANPRESS_THRESHOLD, FP_ELANPRESS_ENROLL_STAGES,
- * FP_ELANPRESS_IMAGES_PER_TOUCH and FP_ELANPRESS_DUP_SIMILARITY override
- * them at runtime. driver_data indexes elanpress_devices[]. */
-typedef struct
-{
-  double threshold;        /* accept when the best score reaches this */
-  int    enroll_stages;    /* touches stored during enrollment */
-  int    images_per_touch; /* distinct images an enroll touch keeps */
-  double dup_similarity;   /* zero-shift similarity above which two frames
-                            * of a touch are duplicates */
-} ElanpressDeviceConfig;
 
 enum {
   ELANPRESS_0C3D,
