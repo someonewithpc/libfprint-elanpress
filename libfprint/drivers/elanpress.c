@@ -1015,6 +1015,17 @@ open_run_state (FpiSsm *ssm, FpDevice *dev)
 static void
 open_complete (FpiSsm *ssm, FpDevice *dev, GError *error)
 {
+  FpiDeviceElanPress *self = FPI_DEVICE_ELANPRESS (dev);
+
+  /* close doesn't run after a failed open, so undo what open did here,
+   * or the interface stays claimed while the FpDevice lives */
+  if (error)
+    {
+      g_clear_pointer (&self->dump_dir, g_free);
+      g_clear_pointer (&self->dump_session, g_free);
+      g_usb_device_release_interface (fpi_device_get_usb_device (dev),
+                                      0, 0, NULL);
+    }
   fpi_device_open_complete (dev, error);
 }
 
