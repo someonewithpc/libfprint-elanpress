@@ -1257,6 +1257,7 @@ fpi_device_probe_complete (FpDevice    *device,
 void
 fpi_device_open_complete (FpDevice *device, GError *error)
 {
+  g_autoptr(GError) nested_error = NULL;
   FpDevicePrivate *priv = fp_device_get_instance_private (device);
 
   g_return_if_fail (FP_IS_DEVICE (device));
@@ -1273,10 +1274,21 @@ fpi_device_open_complete (FpDevice *device, GError *error)
   fpi_device_report_finger_status (device, FP_FINGER_STATUS_NONE);
 
   if (!error)
-    fpi_device_return_task_in_idle (device, FP_DEVICE_TASK_RETURN_BOOL,
-                                    GUINT_TO_POINTER (TRUE));
-  else
-    fpi_device_return_task_in_idle (device, FP_DEVICE_TASK_RETURN_ERROR, error);
+    {
+      fpi_device_return_task_in_idle (device, FP_DEVICE_TASK_RETURN_BOOL,
+                                      GUINT_TO_POINTER (TRUE));
+      return;
+    }
+
+  /* fp_device_open () opened the USB device before calling the driver. The
+   * device never became open as far as the API is concerned, so no close
+   * will follow: close it here, or the handle is leaked. */
+  if (priv->type == FP_DEVICE_TYPE_USB &&
+      !g_usb_device_close (priv->usb_device, &nested_error))
+    g_warning ("Could not close the USB device after a failed open: %s",
+               nested_error->message);
+
+  fpi_device_return_task_in_idle (device, FP_DEVICE_TASK_RETURN_ERROR, error);
 }
 
 /**
